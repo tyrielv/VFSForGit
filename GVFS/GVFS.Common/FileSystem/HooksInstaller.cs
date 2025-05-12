@@ -53,6 +53,7 @@ namespace GVFS.Common.FileSystem
         public static bool InstallHooks(GVFSContext context, out string error)
         {
             error = string.Empty;
+            Debugger.Launch();                
             try
             {
                 foreach (HookData hook in NativeHooks)
