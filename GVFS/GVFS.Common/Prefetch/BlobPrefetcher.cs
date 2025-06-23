@@ -8,8 +8,10 @@ using Newtonsoft.Json;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace GVFS.Common.Prefetch
@@ -29,9 +31,9 @@ namespace GVFS.Common.Prefetch
         protected readonly int IndexThreadCount;
 
         protected readonly bool SkipConfigUpdate;
-
         private const string AreaPath = nameof(BlobPrefetcher);
         private static string pathSeparatorString = Path.DirectorySeparatorChar.ToString();
+        private static readonly Regex Sha1Pattern = new Regex(@"^[0-9a-f]{40}$", RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
         private FileBasedDictionary<string, string> lastPrefetchArgs;
 
@@ -43,7 +45,7 @@ namespace GVFS.Common.Prefetch
             int searchThreadCount,
             int downloadThreadCount,
             int indexThreadCount)
-            : this(tracer, enlistment, objectRequestor, null, null, null, chunkSize, searchThreadCount, downloadThreadCount, indexThreadCount)
+            : this(tracer, enlistment, objectRequestor, null, null, null, 0, null, chunkSize, searchThreadCount, downloadThreadCount, indexThreadCount)
         {
         }
 
@@ -53,6 +55,8 @@ namespace GVFS.Common.Prefetch
             GitObjectsHttpRequestor objectRequestor,
             List<string> fileList,
             List<string> folderList,
+            List<string> objectsList,
+            int depth,
             FileBasedDictionary<string, string> lastPrefetchArgs,
             int chunkSize,
             int searchThreadCount,
@@ -70,6 +74,8 @@ namespace GVFS.Common.Prefetch
             this.GitObjects = new PrefetchGitObjects(tracer, enlistment, this.ObjectRequestor);
             this.FileList = fileList ?? new List<string>();
             this.FolderList = folderList ?? new List<string>();
+            this.ObjectsList = objectsList ?? new List<string>();
+            this.CommitDepth = depth;
 
             this.lastPrefetchArgs = lastPrefetchArgs;
 
@@ -83,30 +89,34 @@ namespace GVFS.Common.Prefetch
 
         public List<string> FolderList { get; }
 
+        public List<string> ObjectsList { get; }
+
+        public int CommitDepth { get; }
+
         public static bool TryLoadFolderList(Enlistment enlistment, string foldersInput, string folderListFile, List<string> folderListOutput, bool readListFromStdIn, out string error)
         {
-            return TryLoadFileOrFolderList(
+            return TryLoadList(
                     enlistment,
                     foldersInput,
                     folderListFile,
-                    isFolder: true,
                     readListFromStdIn: readListFromStdIn,
                     output: folderListOutput,
                     elementValidationFunction: s =>
                         s.Contains("*") ?
                             "Wildcards are not supported for folders. Invalid entry: " + s :
                             null,
+                    elementFormattingFunction: s =>
+                        ToFilterPath(s, isFolder: true),
                     error: out error);
         }
 
         public static bool TryLoadFileList(Enlistment enlistment, string filesInput, string filesListFile, List<string> fileListOutput, bool readListFromStdIn, out string error)
         {
-            return TryLoadFileOrFolderList(
+            return TryLoadList(
                 enlistment,
                 filesInput,
                 filesListFile,
                 readListFromStdIn: readListFromStdIn,
-                isFolder: false,
                 output: fileListOutput,
                 elementValidationFunction: s =>
                 {
@@ -123,6 +133,23 @@ namespace GVFS.Common.Prefetch
 
                     return null;
                 },
+                elementFormattingFunction: s =>
+                    ToFilterPath(s, isFolder: false),
+                error: out error);
+        }
+
+        public static bool TryLoadObjectList(Enlistment enlistment, string objectListInput, string objectListFile, List<string> objectListOutput, bool readListFromStdIn, out string error)
+        {
+            return TryLoadList(
+                enlistment,
+                objectListInput,
+                objectListFile,
+                readListFromStdIn: readListFromStdIn,
+                output: objectListOutput,
+                elementValidationFunction:
+                    s => Sha1Pattern.IsMatch(s) ? null : "Invalid object id: " + s,
+                elementFormattingFunction: s =>
+                    s,
                 error: out error);
         }
 
@@ -132,21 +159,30 @@ namespace GVFS.Common.Prefetch
             string commitId,
             List<string> files,
             List<string> folders,
+            List<string> objectIds,
+            int commitDepth,
             bool hydrateFilesAfterDownload)
         {
             if (lastPrefetchArgs != null &&
                 lastPrefetchArgs.TryGetValue(PrefetchArgs.CommitId, out string lastCommitId) &&
                 lastPrefetchArgs.TryGetValue(PrefetchArgs.Files, out string lastFilesString) &&
                 lastPrefetchArgs.TryGetValue(PrefetchArgs.Folders, out string lastFoldersString) &&
-                lastPrefetchArgs.TryGetValue(PrefetchArgs.Hydrate, out string lastHydrateString))
+                lastPrefetchArgs.TryGetValue(PrefetchArgs.Hydrate, out string lastHydrateString) &&
+                lastPrefetchArgs.TryGetValue(PrefetchArgs.Objects, out string lastObjectsString) &&
+                lastPrefetchArgs.TryGetValue(PrefetchArgs.Depth, out string lastDepthString))
             {
                 string newFilesString = JsonConvert.SerializeObject(files);
                 string newFoldersString = JsonConvert.SerializeObject(folders);
+                string newObjectsString = JsonConvert.SerializeObject(objectIds);
+
                 bool isNoop =
                     commitId == lastCommitId &&
                     hydrateFilesAfterDownload.ToString() == lastHydrateString &&
                     newFilesString == lastFilesString &&
-                    newFoldersString == lastFoldersString;
+                    newFoldersString == lastFoldersString &&
+                    newObjectsString == lastObjectsString &&
+                    commitDepth.ToString(CultureInfo.InvariantCulture) == lastDepthString
+                ;
 
                 tracer.RelatedEvent(
                     EventLevel.Informational,
@@ -156,10 +192,14 @@ namespace GVFS.Common.Prefetch
                         { "Last" + PrefetchArgs.CommitId, lastCommitId },
                         { "Last" + PrefetchArgs.Files, lastFilesString },
                         { "Last" + PrefetchArgs.Folders, lastFoldersString },
+                        { "Last" + PrefetchArgs.Objects, lastObjectsString },
+                        { "Last" + PrefetchArgs.Depth, lastDepthString },
                         { "Last" + PrefetchArgs.Hydrate, lastHydrateString },
                         { "New" + PrefetchArgs.CommitId, commitId },
                         { "New" + PrefetchArgs.Files, newFilesString },
                         { "New" + PrefetchArgs.Folders, newFoldersString },
+                        { "New" + PrefetchArgs.Objects, JsonConvert.SerializeObject(objectIds) },
+                        { "New" + PrefetchArgs.Depth, commitDepth.ToString(CultureInfo.InvariantCulture) },
                         { "New" + PrefetchArgs.Hydrate, hydrateFilesAfterDownload.ToString() },
                         { "Result", isNoop },
                     });
@@ -528,7 +568,15 @@ namespace GVFS.Common.Prefetch
             }
         }
 
-        private static bool TryLoadFileOrFolderList(Enlistment enlistment, string valueString, string listFileName, bool readListFromStdIn, bool isFolder, List<string> output, Func<string, string> elementValidationFunction, out string error)
+        private static bool TryLoadList(
+            Enlistment enlistment,
+            string valueString,
+            string listFileName,
+            bool readListFromStdIn,
+            List<string> output,
+            Func<string, string> elementFormattingFunction,
+            Func<string, string> elementValidationFunction,
+            out string error)
         {
             output.AddRange(
                 GetFilesFromVerbParameter(valueString)
@@ -536,7 +584,7 @@ namespace GVFS.Common.Prefetch
                 .Union(GetFilesFromStdin(readListFromStdIn))
                 .Where(path => !path.StartsWith(GVFSConstants.GitCommentSign.ToString()))
                 .Where(path => !string.IsNullOrWhiteSpace(path))
-                .Select(path => BlobPrefetcher.ToFilterPath(path, isFolder: isFolder)));
+                .Select(elementFormattingFunction));
 
             if (!string.IsNullOrWhiteSpace(fileReadError))
             {
@@ -608,6 +656,8 @@ namespace GVFS.Common.Prefetch
             public const string Files = "Files";
             public const string Folders = "Folders";
             public const string Hydrate = "Hydrate";
+            public const string Objects = "Objects";
+            public const string Depth = "Depth";
         }
     }
 }

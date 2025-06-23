@@ -70,6 +70,34 @@ namespace GVFS.CommandLine
         public string FilesListFile { get; set; }
 
         [Option(
+            "objects",
+            Required = false,
+            Default = "",
+            HelpText = "A semicolon-delimited list of objects (40-digit SHA1 IDs) to fetch. Wildcards not supported. Any commits specified will include the trees for that commit.")]
+        public string Objects { get; set; }
+
+        [Option(
+            "objects-list",
+            Required = false,
+            Default = "",
+            HelpText = "A file containing line-delimited list of objects (40-digit SHA1 IDs) to fetch. Wildcards not supported. Any commits specified will include the trees for that commit.")]
+        public string ObjectsListFile { get; set; }
+
+        [Option(
+            "stdin-objects-list",
+            Required = false,
+            Default = false,
+            HelpText = "Specify this flag to load object list from stdin. Same format as when loading from file.")]
+        public bool ObjectsFromStdIn { get; set; }
+
+        [Option(
+            "commit-depth",
+            Required = false,
+            Default = 0,
+            HelpText = "The depth of commit history to fetch when using --objects with commit IDs. For example, a value of 1 will also fetch the parent(s) and their trees for any commits specified in the objects list.")]
+        public int CommitDepth { get; set; }
+
+        [Option(
             "hydrate",
             Required = false,
             Default = false,
@@ -131,18 +159,26 @@ namespace GVFS.CommandLine
                     metadata.Add("FilesFromStdIn", this.FilesFromStdIn);
                     metadata.Add("FoldersFromStdIn", this.FoldersFromStdIn);
                     metadata.Add("HydrateFiles", this.HydrateFiles);
+                    metadata.Add("Objects", this.Objects);
+                    metadata.Add("ObjectsListFile", this.ObjectsListFile);
+                    metadata.Add("ObjectsFromStdIn", this.ObjectsFromStdIn);
+                    metadata.Add("CommitDepth", this.CommitDepth);
                     tracer.RelatedEvent(EventLevel.Informational, "PerformPrefetch", metadata);
 
                     if (this.Commits)
                     {
                         if (!string.IsNullOrWhiteSpace(this.Files) ||
                             !string.IsNullOrWhiteSpace(this.Folders) ||
+                            !string.IsNullOrWhiteSpace(this.Objects) ||
                             !string.IsNullOrWhiteSpace(this.FoldersListFile) ||
                             !string.IsNullOrWhiteSpace(this.FilesListFile) ||
+                            !string.IsNullOrWhiteSpace(this.ObjectsListFile) ||
                             this.FilesFromStdIn ||
-                            this.FoldersFromStdIn)
+                            this.FoldersFromStdIn ||
+                            this.ObjectsFromStdIn
+                            )
                         {
-                            this.ReportErrorAndExit(tracer, "You cannot prefetch commits and blobs at the same time.");
+                            this.ReportErrorAndExit(tracer, "You cannot prefetch the commit graph and other objects at the same time.");
                         }
 
                         if (this.HydrateFiles)
@@ -165,11 +201,12 @@ namespace GVFS.CommandLine
                         string headCommitId;
                         List<string> filesList;
                         List<string> foldersList;
+                        List<string> objectsList;
                         FileBasedDictionary<string, string> lastPrefetchArgs;
 
-                        this.LoadBlobPrefetchArgs(tracer, enlistment, out headCommitId, out filesList, out foldersList, out lastPrefetchArgs);
+                        this.LoadBlobPrefetchArgs(tracer, enlistment, out headCommitId, out filesList, out foldersList, out objectsList, out lastPrefetchArgs);
 
-                        if (BlobPrefetcher.IsNoopPrefetch(tracer, lastPrefetchArgs, headCommitId, filesList, foldersList, this.HydrateFiles))
+                        if (BlobPrefetcher.IsNoopPrefetch(tracer, lastPrefetchArgs, headCommitId, filesList, foldersList, objectsList, this.CommitDepth, this.HydrateFiles))
                         {
                             Console.WriteLine("All requested files are already available. Nothing new to prefetch.");
                         }
@@ -183,7 +220,7 @@ namespace GVFS.CommandLine
                                 cacheServerUrl,
                                 out objectRequestor,
                                 out cacheServer);
-                            this.PrefetchBlobs(tracer, enlistment, headCommitId, filesList, foldersList, lastPrefetchArgs, objectRequestor, cacheServer);
+                            this.PrefetchBlobs(tracer, enlistment, headCommitId, filesList, foldersList, objectsList, lastPrefetchArgs, objectRequestor, cacheServer);
                         }
                     }
                 }
@@ -298,6 +335,7 @@ namespace GVFS.CommandLine
             out string headCommitId,
             out List<string> filesList,
             out List<string> foldersList,
+            out List<string> objectsList,
             out FileBasedDictionary<string, string> lastPrefetchArgs)
         {
             string error;
@@ -314,6 +352,7 @@ namespace GVFS.CommandLine
 
             filesList = new List<string>();
             foldersList = new List<string>();
+            objectsList = new List<string>();
 
             if (!BlobPrefetcher.TryLoadFileList(enlistment, this.Files, this.FilesListFile, filesList, readListFromStdIn: this.FilesFromStdIn, error: out error))
             {
@@ -325,14 +364,27 @@ namespace GVFS.CommandLine
                 this.ReportErrorAndExit(tracer, error);
             }
 
-            GitProcess gitProcess = new GitProcess(enlistment);
-            GitProcess.Result result = gitProcess.RevParse(GVFSConstants.DotGit.HeadName);
-            if (result.ExitCodeIsFailure)
+            if (!BlobPrefetcher.TryLoadObjectList(enlistment, this.Objects, this.ObjectsListFile, objectsList, readListFromStdIn: this.ObjectsFromStdIn, error: out error))
             {
-                this.ReportErrorAndExit(tracer, result.Errors);
+                this.ReportErrorAndExit(tracer, error);
             }
 
-            headCommitId = result.Output.Trim();
+            if (!string.IsNullOrEmpty(this.Files) || !string.IsNullOrEmpty(this.Folders))
+            {
+                GitProcess gitProcess = new GitProcess(enlistment);
+                GitProcess.Result result = gitProcess.RevParse(GVFSConstants.DotGit.HeadName);
+                if (result.ExitCodeIsFailure)
+                {
+                    this.ReportErrorAndExit(tracer, result.Errors);
+                }
+
+                headCommitId = result.Output.Trim();
+            }
+            else
+            {
+                // head commit id is not needed when only fetching objects
+                headCommitId = null;
+            }
         }
 
         private void PrefetchBlobs(
@@ -341,6 +393,7 @@ namespace GVFS.CommandLine
             string headCommitId,
             List<string> filesList,
             List<string> foldersList,
+            List<string> objectsList,
             FileBasedDictionary<string, string> lastPrefetchArgs,
             GitObjectsHttpRequestor objectRequestor,
             CacheServerInfo cacheServer)
@@ -351,6 +404,7 @@ namespace GVFS.CommandLine
                 objectRequestor,
                 filesList,
                 foldersList,
+                objectsList,
                 lastPrefetchArgs,
                 ChunkSize,
                 SearchThreadCount,
@@ -358,7 +412,8 @@ namespace GVFS.CommandLine
                 IndexThreadCount);
 
             if (blobPrefetcher.FolderList.Count == 0 &&
-                blobPrefetcher.FileList.Count == 0)
+                blobPrefetcher.FileList.Count == 0 &&
+                blobPrefetcher.ObjectsList.Count == 0)
             {
                 this.ReportErrorAndExit(tracer, "Did you mean to fetch all blobs? If so, specify `--files '*'` to confirm.");
             }
