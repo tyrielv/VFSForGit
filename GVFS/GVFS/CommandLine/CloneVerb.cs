@@ -48,6 +48,13 @@ namespace GVFS.CommandLine
         public string Branch { get; set; }
 
         [Option(
+            'b',
+            "commit",
+            Required =  false,
+            HelpText = "Commit to checkout after clone. If used with --branch, the branch will be created at this commit.")]
+        public string Commit { get; set; }
+
+        [Option(
             "single-branch",
             Required = false,
             Default = false,
@@ -144,6 +151,7 @@ namespace GVFS.CommandLine
                             new EventMetadata
                             {
                                 { "Branch", this.Branch },
+                                { "Commit", this.Commit },
                                 { "LocalCacheRoot", this.LocalCacheRoot },
                                 { "SingleBranch", this.SingleBranch },
                                 { "NoMount", this.NoMount },
@@ -175,9 +183,16 @@ namespace GVFS.CommandLine
                             resolvedLocalCacheRoot = Path.GetFullPath(this.LocalCacheRoot);
                         }
 
+                        string commitDisplay = string.IsNullOrWhiteSpace(this.Commit) ? "HEAD" : this.Commit;
+                        string branchDisplay =
+                            string.IsNullOrWhiteSpace(this.Branch) && string.IsNullOrWhiteSpace(this.Commit) ? "Default" :
+                            string.IsNullOrWhiteSpace(this.Branch) ? "None"
+                            : this.Branch;
+
                         this.Output.WriteLine("Clone parameters:");
                         this.Output.WriteLine("  Repo URL:     " + enlistment.RepoUrl);
-                        this.Output.WriteLine("  Branch:       " + (string.IsNullOrWhiteSpace(this.Branch) ? "Default" : this.Branch));
+                        this.Output.WriteLine("  Commit:       " + commitDisplay);
+                        this.Output.WriteLine("  Branch:       " + branchDisplay);
                         this.Output.WriteLine("  Cache Server: " + cacheServer);
                         this.Output.WriteLine("  Local Cache:  " + resolvedLocalCacheRoot);
                         this.Output.WriteLine("  Destination:  " + enlistment.EnlistmentRoot);
@@ -351,24 +366,25 @@ namespace GVFS.CommandLine
 
                 using (GitObjectsHttpRequestor objectRequestor = new GitObjectsHttpRequestor(tracer, enlistment, cacheServer, retryConfig))
                 {
-                    GitRefs refs = objectRequestor.QueryInfoRefs(this.SingleBranch ? this.Branch : null);
-
-                    if (refs == null)
+                    GitRefs refs;
+                    if (this.Commit == null)
                     {
-                        return new Result("Could not query info/refs from: " + Uri.EscapeUriString(enlistment.RepoUrl));
-                    }
+                        refs = objectRequestor.QueryInfoRefs(this.SingleBranch ? this.Branch : null);
 
-                    if (this.Branch == null)
-                    {
-                        this.Branch = refs.GetDefaultBranch();
+                        if (refs == null)
+                        {
+                            return new Result("Could not query info/refs from: " + Uri.EscapeUriString(enlistment.RepoUrl));
+                        }
 
-                        EventMetadata metadata = new EventMetadata();
-                        metadata.Add("Branch", this.Branch);
-                        tracer.RelatedEvent(EventLevel.Informational, "CloneDefaultRemoteBranch", metadata);
-                    }
-                    else
-                    {
-                        if (!refs.HasBranch(this.Branch))
+                        if (this.Branch == null)
+                        {
+                            this.Branch = refs.GetDefaultBranch();
+
+                            EventMetadata metadata = new EventMetadata();
+                            metadata.Add("Branch", this.Branch);
+                            tracer.RelatedEvent(EventLevel.Informational, "CloneDefaultRemoteBranch", metadata);
+                        }
+                        else if (!refs.HasBranch(this.Branch))
                         {
                             EventMetadata metadata = new EventMetadata();
                             metadata.Add("Branch", this.Branch);
@@ -377,6 +393,10 @@ namespace GVFS.CommandLine
                             string errorMessage = string.Format("Remote branch {0} not found in upstream origin", this.Branch);
                             return new Result(errorMessage);
                         }
+                    }
+                    else
+                    {
+                        refs = new GitRefs(Array.Empty<string>(), null);
                     }
 
                     if (!enlistment.TryCreateEnlistmentSubFolders())
@@ -546,8 +566,9 @@ namespace GVFS.CommandLine
             GVFSContext context = new GVFSContext(tracer, fileSystem, gitRepo, enlistment);
             GVFSGitObjects gitObjects = new GVFSGitObjects(context, objectRequestor);
 
+            var commitId = this.Commit ?? refs.GetTipCommitId(branch);
             if (!this.TryDownloadCommit(
-                refs.GetTipCommitId(branch),
+                commitId,
                 enlistment,
                 objectRequestor,
                 gitObjects,
@@ -570,16 +591,32 @@ namespace GVFS.CommandLine
             }
 
             GitProcess git = new GitProcess(enlistment);
-            string originBranchName = "origin/" + branch;
-            GitProcess.Result createBranchResult = git.CreateBranchWithUpstream(branch, originBranchName);
-            if (createBranchResult.ExitCodeIsFailure)
+            string headName;
+            if (branch != null)
             {
-                return new Result("Unable to create branch '" + originBranchName + "': " + createBranchResult.Errors + "\r\n" + createBranchResult.Output);
+                GitProcess.Result createBranchResult;
+                if (this.Commit != null)
+                {
+                    createBranchResult = git.CreateBranch(branch);
+                }
+                else
+                {
+                    string originBranchName = "origin/" + branch;
+                    createBranchResult = git.CreateBranchWithUpstream(branch, originBranchName);
+                }
+
+                if (createBranchResult.ExitCodeIsFailure)
+                {
+                    return new Result("Unable to create branch '" + branch + "': " + createBranchResult.Errors + "\r\n" + createBranchResult.Output);
+                }
+                headName = "ref: refs/heads/" + branch;
+            }
+            else
+            {
+                headName = this.Commit;
             }
 
-            File.WriteAllText(
-                Path.Combine(enlistment.WorkingDirectoryBackingRoot, GVFSConstants.DotGit.Head),
-                "ref: refs/heads/" + branch);
+            File.WriteAllText(Path.Combine(enlistment.WorkingDirectoryBackingRoot, GVFSConstants.DotGit.Head), headName);
 
             if (!this.TryDownloadRootGitAttributes(enlistment, gitObjects, gitRepo, out errorMessage))
             {
