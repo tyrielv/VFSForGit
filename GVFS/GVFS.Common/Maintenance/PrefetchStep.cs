@@ -16,6 +16,7 @@ namespace GVFS.Common.Maintenance
         private const int LockWaitTimeMs = 100;
         private const int WaitingOnLockLogThreshold = 50;
         private const string PrefetchCommitsAndTreesLock = "prefetch-commits-trees.lock";
+        private const string OutOfOrderPrefetchMarker = "out-of-order-prefetch.marker";
         private const int NoExistingPrefetchPacks = -1;
         private readonly TimeSpan timeBetweenPrefetches = TimeSpan.FromMinutes(70);
 
@@ -155,6 +156,25 @@ namespace GVFS.Common.Maintenance
         private bool TryGetMaxGoodPrefetchTimestamp(out long maxGoodTimestamp, out string error)
         {
             this.Context.FileSystem.CreateDirectory(this.Context.Enlistment.GitPackRoot);
+            maxGoodTimestamp = NoExistingPrefetchPacks;
+            error = null;
+            var prefetchInProgressMarker = Path.Combine(this.Context.Enlistment.GitPackRoot, OutOfOrderPrefetchMarker);
+            if (this.Context.FileSystem.FileExists(prefetchInProgressMarker))
+            {
+                /* The GVFS cache servers typically will return 1 very large pack file containing
+                 * most of the commits and trees in the graph, with several smaller packs containing
+                 * the most recent commits and trees.
+                 *
+                 * By having a marker file (separate from the lock file, which indicates if another prefetch process
+                 * is working on prefetch currently), we can index and start using the smaller packs while the bigger,
+                 * older one is still in the process of being indexed. Without this marker, if the indexing of the
+                 * large pack is interrupted then we would not know to restart prefetch from the beginning.
+                 */
+
+                EventMetadata metadata = this.CreateEventMetadata();
+                this.Context.Tracer.RelatedWarning(metadata, $"{nameof(this.TryGetMaxGoodPrefetchTimestamp)}: Existing prefetch marker file may indicate an in-progress or crashed prefetch operation");
+                return true;
+            }
 
             string[] packs = this.GitObjects.ReadPackFileNames(this.Context.Enlistment.GitPackRoot, GVFSConstants.PrefetchPackPrefix);
             List<PrefetchPackInfo> orderedPacks = packs
@@ -163,7 +183,6 @@ namespace GVFS.Common.Maintenance
                 .OrderBy(packInfo => packInfo.Timestamp)
                 .ToList();
 
-            maxGoodTimestamp = NoExistingPrefetchPacks;
 
             int firstBadPack = -1;
             for (int i = 0; i < orderedPacks.Count; ++i)
@@ -269,6 +288,15 @@ namespace GVFS.Common.Maintenance
             }
 
             error = null;
+            if (maxGoodTimestamp == NoExistingPrefetchPacks && !this.Context.FileSystem.FileExists(prefetchInProgressMarker))
+            {
+                /* If we checked for prefetch packs and found none,
+                 * create the prefetch-in-progress marker file to indicate
+                 * that we need to fully complete a prefetch before we
+                 * can use the last good prefetch file as a cutoff for future
+                 * prefetches. */
+                File.WriteAllText(prefetchInProgressMarker, string.Empty);
+            }
             return true;
         }
 
@@ -327,6 +355,15 @@ namespace GVFS.Common.Maintenance
         /// </summary>
         private void UpdateKeepPacks()
         {
+            string prefetchNotCompletedMarker = Path.Combine(this.Context.Enlistment.GitPackRoot, OutOfOrderPrefetchMarker);
+            if (this.Context.FileSystem.FileExists(prefetchNotCompletedMarker))
+            {
+                /* Indicate that prefetch has fully completed.
+                 * This needs to be done before getting the max good timestamp,
+                 * because if the marker file is present then TryGetMaxGoodPrefetchTimestamp
+                 * will short-circuit. */
+                this.Context.FileSystem.DeleteFile(prefetchNotCompletedMarker);
+            }
             if (!this.TryGetMaxGoodPrefetchTimestamp(out long maxGoodTimeStamp, out string error))
             {
                 return;

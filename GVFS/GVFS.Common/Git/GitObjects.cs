@@ -142,7 +142,7 @@ namespace GVFS.Common.Git
                 List<string> innerPackIndexes = null;
                 RetryWrapper<GitObjectsHttpRequestor.GitObjectTaskResult>.InvocationResult result = this.GitObjectRequestor.TrySendProtocolRequest(
                     requestId: requestId,
-                    onSuccess: (tryCount, response) => this.DeserializePrefetchPacks(response, ref latestTimestamp, ref bytesDownloaded, ref innerPackIndexes, gitProcess, trustPackIndexes),
+                    onSuccess: (tryCount, response) => this.DeserializePrefetchPacks(response, ref bytesDownloaded, ref innerPackIndexes, gitProcess, trustPackIndexes),
                     onFailure: RetryWrapper<GitObjectsHttpRequestor.GitObjectTaskResult>.StandardErrorHandler(activity, requestId, "TryDownloadPrefetchPacks"),
                     method: HttpMethod.Get,
                     endPointGenerator: () => new Uri(
@@ -508,9 +508,8 @@ namespace GVFS.Common.Git
             return metadata;
         }
 
-        private bool TryMovePackAndIdxFromTempFolder(string packName, string packTempPath, string idxName, string idxTempPath, out Exception exception)
+        private void MovePackAndIdxFromTempFolder(string packName, string packTempPath, string idxName, string idxTempPath)
         {
-            exception = null;
             string finalPackPath = Path.Combine(this.Enlistment.GitPackRoot, packName);
             string finalIdxPath = Path.Combine(this.Enlistment.GitPackRoot, idxName);
 
@@ -521,8 +520,6 @@ namespace GVFS.Common.Git
             }
             catch (Win32Exception e)
             {
-                exception = e;
-
                 EventMetadata metadata = CreateEventMetadata(e);
                 metadata.Add("packName", packName);
                 metadata.Add("packTempPath", packTempPath);
@@ -534,12 +531,10 @@ namespace GVFS.Common.Git
                 this.fileSystem.TryDeleteFile(packTempPath, metadataKey: nameof(packTempPath), metadata: metadata);
                 this.fileSystem.TryDeleteFile(finalPackPath, metadataKey: nameof(finalPackPath), metadata: metadata);
 
-                this.Tracer.RelatedWarning(metadata, $"{nameof(this.TryMovePackAndIdxFromTempFolder): Failed to move pack and idx from temp folder}");
+                this.Tracer.RelatedWarning(metadata, $"{nameof(this.MovePackAndIdxFromTempFolder): Failed to move pack and idx from temp folder}");
 
-                return false;
+                throw;
             }
-
-            return true;
         }
 
         private bool TryFlushFileBuffers(string path, out Exception exception, out string error)
@@ -666,7 +661,6 @@ namespace GVFS.Common.Git
         /// </summary>
         private RetryWrapper<GitObjectsHttpRequestor.GitObjectTaskResult>.CallbackResult DeserializePrefetchPacks(
            GitEndPointResponseData response,
-           ref long latestTimestamp,
            ref long bytesDownloaded,
            ref List<string> packIndexes,
            GitProcess gitProcess,
@@ -684,7 +678,7 @@ namespace GVFS.Common.Git
                 string tempPackFolderPath = Path.Combine(this.Enlistment.GitPackRoot, TempPackFolder);
                 this.fileSystem.CreateDirectory(tempPackFolderPath);
 
-                var tempPacksTasks = new List<Task<TempPrefetchPackAndIdx>>();
+                var packResults = new List<PrefetchPackAndIdx>();
                 // Future: We could manage cancellation of index building tasks if one fails (to stop indexing of later
                 // files if an early one fails), but in practice the first pack file takes the majority of the time and
                 // all the others will finish long before it so there would be no benefit to doing so.
@@ -727,15 +721,16 @@ namespace GVFS.Common.Git
                         if (this.TryWriteTempFile(activity, pack.IndexStream, idxTempPath, out var indexLength, out var indexFlushTask))
                         {
                             bytesDownloaded += indexLength;
-                            tempPacksTasks.Add(Task.FromResult(
-                                new TempPrefetchPackAndIdx(pack.Timestamp, packName, packTempPath, packFlushTask, idxName, idxTempPath, indexFlushTask)));
+                            var moveTask = MovePackAndIdxFromTempFolderWhenReadyAsync(packFlushTask, indexFlushTask, packName, packTempPath, idxName, idxTempPath);
+                            packResults.Add(new PrefetchPackAndIdx(pack.Timestamp, packName, packTempPath, idxName, idxTempPath, moveTask));
                         }
                         else
                         {
                             bytesDownloaded += indexLength;
                             // we can try to build the index ourself, and if it's successful then on the retry we can pick up from that point.
                             var indexTask = StartPackIndexAsync(activity, pack, packName, packTempPath, idxName, idxTempPath, packFlushTask);
-                            tempPacksTasks.Add(indexTask);
+                            var moveTask = MovePackAndIdxFromTempFolderWhenReadyAsync(packFlushTask, indexTask, packName, packTempPath, idxName, idxTempPath);
+                            packResults.Add(new PrefetchPackAndIdx(pack.Timestamp, packName, packTempPath, idxName, idxTempPath, moveTask));
                             // but we need to stop trying to read from the download stream as that has failed.
                             allSucceeded = false;
                             break;
@@ -746,7 +741,9 @@ namespace GVFS.Common.Git
                         // Either we can't trust the index file from the server, or the server didn't provide one, so we will build our own.
                         // For performance, we run the index build in the background while we continue downloading the next pack.
                         var indexTask = StartPackIndexAsync(activity, pack, packName, packTempPath, idxName, idxTempPath, packFlushTask);
-                        tempPacksTasks.Add(indexTask);
+
+                        var moveTask = MovePackAndIdxFromTempFolderWhenReadyAsync(packFlushTask, indexTask, packName, packTempPath, idxName, idxTempPath);
+                        packResults.Add(new PrefetchPackAndIdx(pack.Timestamp, packName, packTempPath, idxName, idxTempPath, moveTask));
 
                         // If the server provided an index stream, we still need to consume and handle any exceptions it even
                         // though we are otherwise ignoring it.
@@ -775,35 +772,21 @@ namespace GVFS.Common.Git
                     }
                 }
 
-                // Wait for the index tasks to complete. If any fail, we still copy the prior successful ones
-                // to the pack folder so that the retry will be incremental from where the failure occurred.
-                var tempPacks = new List<TempPrefetchPackAndIdx>();
-                bool indexTasksSucceededSoFar = true;
-                foreach (var task in tempPacksTasks)
-                {
-                    TempPrefetchPackAndIdx tempPack = task.Result;
-                    if (tempPack != null && indexTasksSucceededSoFar)
-                    {
-                        tempPacks.Add(tempPack);
-                    }
-                    else
-                    {
-                        indexTasksSucceededSoFar = false;
-                        tempPack?.PackFlushTask.Wait();
-                        break;
-                    }
-                }
-                allSucceeded = allSucceeded && indexTasksSucceededSoFar;
-
+                /* Wait for the index tasks to complete, which includes copying them to the pack folder.
+                 * If any fail, we won't delete the marker file so the next prefetch will retry prefetch from the
+                 * beginning.
+                 * This creates some redundant work on retry and will be cleaned up by maintenance later, but
+                 * allows the smaller, more recent pack files to be useable sooner during async-prefetch scenario.
+                 */
                 Exception exception = null;
-                if (!this.TryFlushAndMoveTempPacks(tempPacks, ref latestTimestamp, out exception))
+                try
+                {
+                    Task.WhenAll(packResults.Select(x => x.FlushTask)).Wait();
+                }
+                catch (Exception e)
                 {
                     allSucceeded = false;
-                }
-
-                foreach (TempPrefetchPackAndIdx tempPack in tempPacks)
-                {
-                    packIndexes.Add(tempPack.IdxName);
+                    exception = e;
                 }
 
                 if (allSucceeded)
@@ -818,7 +801,24 @@ namespace GVFS.Common.Git
             }
         }
 
-        private Task<TempPrefetchPackAndIdx> StartPackIndexAsync(ITracer activity, PrefetchPacksDeserializer.PackAndIndex pack, string packName, string packTempPath, string idxName, string idxTempPath, Task packFlushTask)
+        private async Task<bool> MovePackAndIdxFromTempFolderWhenReadyAsync(Task packFlushTask, Task<bool> indexFlushTask, string packName, string packTempPath, string idxName, string idxTempPath)
+        {
+            bool result = true;
+            if (packFlushTask != null)
+            {
+                await packFlushTask;
+            }
+
+            if (indexFlushTask != null)
+            {
+                result = await indexFlushTask;
+            }
+
+            this.MovePackAndIdxFromTempFolder(packName, packTempPath, idxName, idxTempPath);
+            return result;
+        }
+
+        private Task<bool> StartPackIndexAsync(ITracer activity, PrefetchPacksDeserializer.PackAndIndex pack, string packName, string packTempPath, string idxName, string idxTempPath, Task packFlushTask)
         {
             var indexTask = Task.Run(async () =>
             {
@@ -828,49 +828,15 @@ namespace GVFS.Common.Git
                 GitProcess gitProcessForIndex = new GitProcess(this.Enlistment);
                 if (this.TryBuildIndex(activity, packTempPath, out var _, gitProcessForIndex))
                 {
-                    return new TempPrefetchPackAndIdx(pack.Timestamp, packName, packTempPath, packFlushTask, idxName, idxTempPath, idxFlushTask: null);
+                    return true;
                 }
                 else
                 {
                     await packFlushTask;
-                    return null;
+                    return false;
                 }
             });
             return indexTask;
-        }
-
-        private bool TryFlushAndMoveTempPacks(List<TempPrefetchPackAndIdx> tempPacks, ref long latestTimestamp, out Exception exception)
-        {
-            exception = null;
-            bool moveFailed = false;
-            foreach (TempPrefetchPackAndIdx tempPack in tempPacks)
-            {
-                if (tempPack.PackFlushTask != null)
-                {
-                    tempPack.PackFlushTask.Wait();
-                }
-
-                if (tempPack.IdxFlushTask != null)
-                {
-                    tempPack.IdxFlushTask.Wait();
-                }
-
-                // If we've hit a failure moving temp files, we should stop trying to move them (but we still need to wait for all outstanding
-                // flush tasks)
-                if (!moveFailed)
-                {
-                    if (this.TryMovePackAndIdxFromTempFolder(tempPack.PackName, tempPack.PackFullPath, tempPack.IdxName, tempPack.IdxFullPath, out exception))
-                    {
-                        latestTimestamp = tempPack.Timestamp;
-                    }
-                    else
-                    {
-                        moveFailed = true;
-                    }
-                }
-            }
-
-            return !moveFailed;
         }
 
         /// <summary>
@@ -1062,33 +1028,30 @@ namespace GVFS.Common.Git
             }
         }
 
-        private class TempPrefetchPackAndIdx
+        private class PrefetchPackAndIdx
         {
-            public TempPrefetchPackAndIdx(
+            public PrefetchPackAndIdx(
                 long timestamp,
                 string packName,
                 string packFullPath,
-                Task packFlushTask,
                 string idxName,
                 string idxFullPath,
-                Task idxFlushTask)
+                Task flushTask)
             {
                 this.Timestamp = timestamp;
                 this.PackName = packName;
                 this.PackFullPath = packFullPath;
-                this.PackFlushTask = packFlushTask;
                 this.IdxName = idxName;
                 this.IdxFullPath = idxFullPath;
-                this.IdxFlushTask = idxFlushTask;
+                this.FlushTask = flushTask;
             }
 
             public long Timestamp { get; }
             public string PackName { get; }
             public string PackFullPath { get; }
-            public Task PackFlushTask { get; }
+            public Task FlushTask { get; }
             public string IdxName { get; }
             public string IdxFullPath { get; }
-            public Task IdxFlushTask { get; }
         }
     }
 }
