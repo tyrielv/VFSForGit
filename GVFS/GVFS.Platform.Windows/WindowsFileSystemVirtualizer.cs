@@ -32,6 +32,10 @@ namespace GVFS.Platform.Windows
         private IVirtualizationInstance virtualizationInstance;
         private ConcurrentDictionary<Guid, ActiveEnumeration> activeEnumerations;
         private ConcurrentDictionary<int, CancellationTokenSource> activeCommands;
+        
+        // For coordinated dehydration: block new enumerations on specific paths
+        private ConcurrentHashSet<string> blockedEnumerationPaths;
+        private readonly object enumerationLock = new object();
 
         public WindowsFileSystemVirtualizer(GVFSContext context, GVFSGitObjects gitObjects)
             : this(
@@ -72,6 +76,7 @@ namespace GVFS.Platform.Windows
 
             this.activeEnumerations = new ConcurrentDictionary<Guid, ActiveEnumeration>();
             this.activeCommands = new ConcurrentDictionary<int, CancellationTokenSource>();
+            this.blockedEnumerationPaths = new ConcurrentHashSet<string>(GVFSPlatform.Instance.Constants.PathComparer);
         }
 
         protected override string EtwArea => ClassName;
@@ -201,8 +206,141 @@ namespace GVFS.Platform.Windows
 
         public override FileSystemResult DehydrateFolder(string relativePath)
         {
-            // Don't need to do anything here because the parent will reproject the folder.
-            return new FileSystemResult(FSResult.Ok, 0);
+            return this.DehydrateFolder(relativePath, null);
+        }
+
+        public override FileSystemResult DehydrateFolder(string relativePath, Action onCompleted)
+        {
+            try
+            {
+                // Block new enumerations and wait for active ones to complete
+                this.BlockEnumerationsAndWait(relativePath);
+                
+                // The parent will reproject the folder after directory-specific projection invalidation
+                FileSystemResult result = new FileSystemResult(FSResult.Ok, 0);
+                
+                // Execute callback to unblock enumerations
+                try
+                {
+                    onCompleted?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    EventMetadata metadata = this.CreateEventMetadata(relativePath, ex);
+                    this.Context.Tracer.RelatedWarning(metadata, "DehydrateFolder callback execution failed");
+                }
+                finally
+                {
+                    // Always unblock enumerations, even if callback fails
+                    this.UnblockEnumerations(relativePath);
+                }
+                
+                return result;
+            }
+            catch (Exception ex)
+            {
+                // Ensure enumerations are unblocked even on failure
+                try
+                {
+                    this.UnblockEnumerations(relativePath);
+                }
+                catch (Exception unblockEx)
+                {
+                    EventMetadata unblockMetadata = this.CreateEventMetadata(relativePath, unblockEx);
+                    this.Context.Tracer.RelatedWarning(unblockMetadata, "Failed to unblock enumerations after DehydrateFolder failure");
+                }
+                
+                EventMetadata metadata = this.CreateEventMetadata(relativePath, ex);
+                this.Context.Tracer.RelatedError(metadata, "DehydrateFolder failed with exception");
+                return new FileSystemResult(FSResult.IOError, unchecked((int)0x80070005)); // ACCESS_DENIED
+            }
+        }
+
+        /// <summary>
+        /// Block new enumerations for a path and its parent, then wait for active enumerations to complete
+        /// </summary>
+        /// <param name="relativePath">Path to block enumerations for</param>
+        private void BlockEnumerationsAndWait(string relativePath)
+        {
+            try
+            {
+                string normalizedPath = relativePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+                string parentPath = Path.GetDirectoryName(normalizedPath) ?? string.Empty;
+                
+                EventMetadata metadata = new EventMetadata();
+                metadata.Add("RelativePath", relativePath);
+                metadata.Add("ParentPath", parentPath);
+                this.Context.Tracer.RelatedEvent(EventLevel.Informational, "DehydrateFolder_BlockEnumerations", metadata);
+
+                lock (this.enumerationLock)
+                {
+                    // Block new enumerations for this path and its parent
+                    this.blockedEnumerationPaths.Add(normalizedPath);
+                    if (!string.IsNullOrEmpty(parentPath))
+                    {
+                        this.blockedEnumerationPaths.Add(parentPath);
+                    }
+                }
+
+                // Wait for active enumerations to complete
+                // We use a simple polling approach with a reasonable timeout
+                const int maxWaitTimeMs = 5000; // 5 seconds max wait
+                const int pollIntervalMs = 50;   // Check every 50ms
+                int elapsedMs = 0;
+                
+                while (elapsedMs < maxWaitTimeMs)
+                {
+                    if (this.activeEnumerations.IsEmpty)
+                    {
+                        break;
+                    }
+                    
+                    Thread.Sleep(pollIntervalMs);
+                    elapsedMs += pollIntervalMs;
+                }
+
+                EventMetadata waitMetadata = new EventMetadata();
+                waitMetadata.Add("ElapsedMs", elapsedMs);
+                waitMetadata.Add("ActiveEnumerations", this.activeEnumerations.Count);
+                this.Context.Tracer.RelatedEvent(EventLevel.Informational, "DehydrateFolder_WaitComplete", waitMetadata);
+            }
+            catch (Exception ex)
+            {
+                EventMetadata metadata = this.CreateEventMetadata(relativePath, ex);
+                this.Context.Tracer.RelatedWarning(metadata, $"{nameof(this.BlockEnumerationsAndWait)}: Failed to block enumerations");
+                // Don't fail the operation if enumeration blocking fails
+            }
+        }
+
+        /// <summary>
+        /// Unblock enumerations for a path after dehydration is complete
+        /// </summary>
+        /// <param name="relativePath">Path to unblock enumerations for</param>
+        public void UnblockEnumerations(string relativePath)
+        {
+            try
+            {
+                string normalizedPath = relativePath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+                string parentPath = Path.GetDirectoryName(normalizedPath) ?? string.Empty;
+
+                lock (this.enumerationLock)
+                {
+                    this.blockedEnumerationPaths.TryRemove(normalizedPath);
+                    if (!string.IsNullOrEmpty(parentPath))
+                    {
+                        this.blockedEnumerationPaths.TryRemove(parentPath);
+                    }
+                }
+
+                EventMetadata metadata = new EventMetadata();
+                metadata.Add("RelativePath", relativePath);
+                this.Context.Tracer.RelatedEvent(EventLevel.Informational, "DehydrateFolder_UnblockEnumerations", metadata);
+            }
+            catch (Exception ex)
+            {
+                EventMetadata metadata = this.CreateEventMetadata(relativePath, ex);
+                this.Context.Tracer.RelatedWarning(metadata, $"{nameof(this.UnblockEnumerations)}: Failed to unblock enumerations");
+            }
         }
 
         // TODO: Need ProjFS 13150199 to be fixed so that GVFS doesn't leak memory if the enumeration cancelled.
@@ -211,6 +349,20 @@ namespace GVFS.Platform.Windows
         {
             try
             {
+                // Check if enumerations are blocked for this path
+                string normalizedPath = virtualPath.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+                lock (this.enumerationLock)
+                {
+                    if (this.blockedEnumerationPaths.Contains(normalizedPath))
+                    {
+                        EventMetadata metadata = new EventMetadata();
+                        metadata.Add("VirtualPath", virtualPath);
+                        metadata.Add("EnumerationId", enumerationId);
+                        this.Context.Tracer.RelatedEvent(EventLevel.Informational, "StartDirectoryEnumeration_Blocked", metadata);
+                        return HResult.AccessDenied; // Block the enumeration
+                    }
+                }
+
                 List<ProjectedFileInfo> projectedItems;
                 if (this.FileSystemCallbacks.GitIndexProjection.TryGetProjectedItemsFromMemory(virtualPath, out projectedItems))
                 {

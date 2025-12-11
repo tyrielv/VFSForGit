@@ -46,6 +46,13 @@ namespace GVFS.CommandLine
             HelpText = "A semicolon (" + FolderListSeparator + ") delimited list of folders to dehydrate. Each folder must be relative to the repository root.")]
         public string Folders { get; set; }
 
+        [Option(
+            "no-unmount",
+            Default = false,
+            Required = false,
+            HelpText = "EXPERIMENTAL: Use coordinated dehydration approach that avoids unmounting the file system. This should be faster but is less tested.")]
+        public bool NoUnmount { get; set; }
+
         public string RunningVerbName { get; set; } = DehydrateVerbName;
         public string ActionName { get; set; } = DehydrateVerbName;
 
@@ -181,7 +188,6 @@ from a parent of the folders list.
 
                 this.Output.WriteLine();
 
-                this.Unmount(tracer);
 
                 string error;
                 if (!DiskLayoutUpgrade.TryCheckDiskLayoutVersion(tracer, enlistment.EnlistmentRoot, out error))
@@ -191,6 +197,7 @@ from a parent of the folders list.
 
                 if (fullDehydrate)
                 {
+                    this.Unmount(tracer);
                     RetryConfig retryConfig;
                     if (!RetryConfig.TryLoadFromGitConfig(tracer, enlistment, out retryConfig, out error))
                     {
@@ -216,7 +223,17 @@ from a parent of the folders list.
                     {
                         if (cleanStatus)
                         {
-                            this.DehydrateFolders(tracer, enlistment, folders);
+                            if (this.NoUnmount)
+                            {
+                                this.WriteMessage(tracer, "Using experimental coordinated dehydration approach (no unmount).");
+                                this.DehydrateFoldersCoordinated(tracer, enlistment, folders);
+                            }
+                            else
+                            {
+                                this.WriteMessage(tracer, "Using traditional dehydration approach (with unmount/remount).");
+                                this.Unmount(tracer);
+                                this.DehydrateFolders(tracer, enlistment, folders);
+                            }
                         }
                         else
                         {
@@ -228,6 +245,98 @@ from a parent of the folders list.
                         this.ReportErrorAndExit($"No folders to {this.ActionName}.");
                     }
                 }
+            }
+        }
+
+        private void DehydrateFoldersCoordinated(JsonTracer tracer, GVFSEnlistment enlistment, string[] folders)
+        {
+            List<string> foldersToDehydrate = new List<string>();
+            List<string> folderErrors = new List<string>();
+
+            this.WriteMessage(tracer, "Starting coordinated folder dehydration (no unmount required)...");
+
+            // First, physically delete directories while mounted
+            if (!this.ShowStatusWhileRunning(
+                () =>
+                {
+                    if (!ModifiedPathsDatabase.TryLoadOrCreate(
+                            tracer,
+                            Path.Combine(enlistment.DotGVFSRoot, GVFSConstants.DotGVFS.Databases.ModifiedPaths),
+                            this.fileSystem,
+                            out ModifiedPathsDatabase modifiedPaths,
+                            out string error))
+                    {
+                        this.WriteMessage(tracer, $"Unable to open modified paths database: {error}");
+                        return false;
+                    }
+
+                    using (modifiedPaths)
+                    {
+                        string ioError;
+                        foreach (string folder in folders)
+                        {
+                            string normalizedPath = GVFSDatabase.NormalizePath(folder);
+                            if (!this.IsFolderValid(normalizedPath))
+                            {
+                                this.WriteMessage(tracer, $"Cannot {this.ActionName} folder '{folder}': invalid folder path.");
+                            }
+                            else
+                            {
+                                // Check if parent folder is in the modified paths
+                                if (modifiedPaths.ContainsParentFolder(folder, out string parentFolder))
+                                {
+                                    this.WriteMessage(tracer, $"Cannot {this.ActionName} folder '{folder}': Must {this.ActionName} parent folder '{parentFolder}'.");
+                                }
+                                else
+                                {
+                                    string fullPath = Path.Combine(enlistment.WorkingDirectoryBackingRoot, folder);
+                                    if (this.fileSystem.DirectoryExists(fullPath))
+                                    {
+                                        // Delete directory while mounted - this is the key difference
+                                        if (!this.TryIO(tracer, () => this.fileSystem.DeleteDirectory(fullPath, ignoreDirectoryDeleteExceptions: true), $"Deleting '{fullPath}'", out ioError))
+                                        {
+                                            this.WriteMessage(tracer, $"Cannot {this.ActionName} folder '{folder}': removing '{folder}' failed.");
+                                            this.WriteMessage(tracer, "Ensure no applications are accessing the folder and retry.");
+                                            this.WriteMessage(tracer, $"More details: {ioError}");
+                                            folderErrors.Add($"{folder}\0{ioError}");
+                                        }
+                                        else
+                                        {
+                                            foldersToDehydrate.Add(folder);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        this.WriteMessage(tracer, $"Cannot {this.ActionName} folder '{folder}': '{folder}' does not exist.");
+                                        // Still add to foldersToDehydrate so that any placeholders or modified paths get cleaned up
+                                        foldersToDehydrate.Add(folder);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    return true;
+                },
+                "Cleaning up folders"))
+            {
+                this.ReportErrorAndExit(tracer, $"{this.ActionName} for folders failed.");
+            }
+
+            // Now send the coordinated dehydrate message to the mounted instance
+            if (foldersToDehydrate.Count > 0)
+            {
+                this.SendCoordinatedDehydrateMessage(tracer, enlistment, folderErrors, foldersToDehydrate);
+            }
+
+            if (folderErrors.Count > 0)
+            {
+                foreach (string folderError in folderErrors)
+                {
+                    this.ErrorOutput.WriteLine(folderError);
+                }
+
+                this.ReportErrorAndExit(tracer, ReturnCode.DehydrateFolderFailures, $"Failed to dehydrate {folderErrors.Count} folder(s).");
             }
         }
 
@@ -341,6 +450,45 @@ from a parent of the folders list.
             }
 
             return true;
+        }
+
+        private void SendCoordinatedDehydrateMessage(ITracer tracer, GVFSEnlistment enlistment, List<string> folderErrors, List<string> folders)
+        {
+            NamedPipeMessages.DehydrateFolders.Response response = null;
+
+            try
+            {
+                using (NamedPipeClient pipeClient = new NamedPipeClient(enlistment.NamedPipeName))
+                {
+                    if (!pipeClient.Connect())
+                    {
+                        this.ReportErrorAndExit("Unable to connect to GVFS.  Try running 'gvfs mount'");
+                    }
+
+                    // Use a special coordinated dehydrate request
+                    NamedPipeMessages.DehydrateFolders.Request request = new NamedPipeMessages.DehydrateFolders.Request(string.Join(FolderListSeparator, folders));
+                    pipeClient.SendRequest(request.CreateMessage());
+                    response = NamedPipeMessages.DehydrateFolders.Response.FromMessage(NamedPipeMessages.Message.FromString(pipeClient.ReadRawResponse()));
+                }
+            }
+            catch (BrokenPipeException e)
+            {
+                this.ReportErrorAndExit("Unable to communicate with GVFS: " + e.ToString());
+            }
+
+            if (response != null)
+            {
+                foreach (string folder in response.SuccessfulFolders)
+                {
+                    this.WriteMessage(tracer, $"{folder} folder {this.ActionName} successful (coordinated mode).");
+                }
+
+                foreach (string folder in response.FailedFolders)
+                {
+                    this.WriteMessage(tracer, $"{folder} folder failed to {this.ActionName}. You may need to reset the working directory by deleting {folder}, running `git reset --hard`, and retry the {this.ActionName}.");
+                    folderErrors.Add(folder);
+                }
+            }
         }
 
         private void SendDehydrateMessage(ITracer tracer, GVFSEnlistment enlistment, List<string> folderErrors, List<string> folders)

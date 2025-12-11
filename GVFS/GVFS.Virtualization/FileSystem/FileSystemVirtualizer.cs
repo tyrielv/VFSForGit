@@ -110,6 +110,7 @@ namespace GVFS.Virtualization.FileSystem
             out UpdateFailureReason failureReason);
 
         public abstract FileSystemResult DehydrateFolder(string relativePath);
+        public abstract FileSystemResult DehydrateFolder(string relativePath, Action onCompleted);
 
         public void Dispose()
         {

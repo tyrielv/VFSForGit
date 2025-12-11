@@ -338,6 +338,51 @@ namespace GVFS.Virtualization.Projection
             this.modifiedFilesInvalid = true;
         }
 
+        /// <summary>
+        /// Invalidate projection for a specific directory and its ancestors to ensure proper reprojection after dehydration
+        /// </summary>
+        /// <param name="relativePath">The relative path of the directory to invalidate</param>
+        public void InvalidateDirectoryProjection(string relativePath)
+        {
+            EventMetadata metadata = new EventMetadata();
+            metadata.Add("relativePath", relativePath);
+            this.context.Tracer.RelatedEvent(EventLevel.Informational, "InvalidateDirectoryProjection", metadata);
+
+            string normalizedPath = GVFSDatabase.NormalizePath(relativePath);
+            
+            // Remove the specific directory and all its children from the projection cache
+            List<string> keysToRemove = new List<string>();
+            foreach (string key in this.projectionFolderCache.Keys)
+            {
+                if (key.Equals(normalizedPath, GVFSPlatform.Instance.Constants.PathComparison) ||
+                    key.StartsWith(normalizedPath + Path.DirectorySeparatorChar, GVFSPlatform.Instance.Constants.PathComparison))
+                {
+                    keysToRemove.Add(key);
+                }
+            }
+
+            foreach (string key in keysToRemove)
+            {
+                this.projectionFolderCache.TryRemove(key, out _);
+            }
+
+            // Also invalidate parent directories up to the root to ensure they re-enumerate correctly
+            string parentPath = normalizedPath;
+            while (!string.IsNullOrEmpty(parentPath))
+            {
+                this.projectionFolderCache.TryRemove(parentPath, out _);
+                int lastSeparator = parentPath.LastIndexOf(Path.DirectorySeparatorChar);
+                if (lastSeparator <= 0)
+                {
+                    break;
+                }
+                parentPath = parentPath.Substring(0, lastSeparator);
+            }
+
+            // Also clear the root entry
+            this.projectionFolderCache.TryRemove(string.Empty, out _);
+        }
+
         public void OnPlaceholderCreateBlockedForGit()
         {
             int count = Interlocked.Increment(ref this.negativePathCacheUpdatedForGitCount);

@@ -188,6 +188,24 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
         }
 
         [TestCase]
+        public void FolderDehydrateNoUnmountShouldSucceed()
+        {
+            string folderToDehydrate = "GVFS";
+            TestPath folderToReadFiles = new TestPath(this.Enlistment, folderToDehydrate);
+            TestPath fileToRead = new TestPath(this.Enlistment, Path.Combine(folderToDehydrate, "GVFS", "Program.cs"));
+
+            using (File.OpenRead(fileToRead.VirtualPath))
+            {
+            }
+
+            // Test the new no-unmount approach
+            this.DehydrateShouldSucceedNoUnmount(new[] { $"{folderToDehydrate} folder dehydrate successful (coordinated mode)." }, confirm: true, noStatus: false, foldersToDehydrate: folderToDehydrate);
+            
+            // Verify the folder was properly dehydrated without unmounting
+            this.PlaceholdersShouldNotContain(folderToDehydrate, fileToRead.BasePath);
+        }
+
+        [TestCase]
         public void FolderDehydrateFolderWithFilesThatWerePlaceholders()
         {
             string folderToDehydrate = "GVFS";
@@ -560,7 +578,7 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
 
         private void DehydrateShouldSucceed(string[] expectedInOutput, bool confirm, bool noStatus, params string[] foldersToDehydrate)
         {
-            ProcessResult result = this.RunDehydrateProcess(confirm, noStatus, foldersToDehydrate);
+            ProcessResult result = this.RunDehydrateProcess(confirm, noStatus, noUnmount: false, foldersToDehydrate);
             result.ExitCode.ShouldEqual(0, $"mount exit code was {result.ExitCode}. Output: {result.Output}");
 
             if (result.Output.Contains("Failed to move the src folder: Access to the path"))
@@ -572,14 +590,22 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
             result.Output.ShouldContain(expectedInOutput);
         }
 
+        private void DehydrateShouldSucceedNoUnmount(string[] expectedInOutput, bool confirm, bool noStatus, params string[] foldersToDehydrate)
+        {
+            ProcessResult result = this.RunDehydrateProcess(confirm, noStatus, noUnmount: true, foldersToDehydrate);
+            result.ExitCode.ShouldEqual(0, $"mount exit code was {result.ExitCode}. Output: {result.Output}");
+
+            result.Output.ShouldContain(expectedInOutput);
+        }
+
         private void DehydrateShouldFail(string[] expectedErrorMessages, bool noStatus, params string[] foldersToDehydrate)
         {
-            ProcessResult result = this.RunDehydrateProcess(confirm: true, noStatus: noStatus, foldersToDehydrate: foldersToDehydrate);
+            ProcessResult result = this.RunDehydrateProcess(confirm: true, noStatus: noStatus, noUnmount: false, foldersToDehydrate: foldersToDehydrate);
             result.ExitCode.ShouldEqual(GVFSGenericError, $"mount exit code was not {GVFSGenericError}");
             result.Output.ShouldContain(expectedErrorMessages);
         }
 
-        private ProcessResult RunDehydrateProcess(bool confirm, bool noStatus, params string[] foldersToDehydrate)
+        private ProcessResult RunDehydrateProcess(bool confirm, bool noStatus, bool noUnmount, params string[] foldersToDehydrate)
         {
             string dehydrateFlags = string.Empty;
             if (confirm)
@@ -590,6 +616,11 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
             if (noStatus)
             {
                 dehydrateFlags += " --no-status ";
+            }
+
+            if (noUnmount)
+            {
+                dehydrateFlags += " --no-unmount ";
             }
 
             if (foldersToDehydrate.Length > 0)

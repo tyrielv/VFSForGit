@@ -361,6 +361,91 @@ namespace GVFS.Virtualization
             this.GitIndexProjection.WaitForProjectionUpdate();
         }
 
+        /// <summary>
+        /// Coordinated folder dehydration that properly manages ProjFS state without requiring unmount
+        /// </summary>
+        /// <param name="relativePath">Path to dehydrate</param>
+        /// <param name="errorMessage">Error message if operation fails</param>
+        /// <returns>True if successful</returns>
+        public bool TryDehydrateFolderCoordinated(string relativePath, out string errorMessage)
+        {
+            List<IPlaceholderData> removedPlaceholders = null;
+            List<string> removedModifiedPaths = null;
+            errorMessage = string.Empty;
+
+            try
+            {
+                relativePath = GVFSDatabase.NormalizePath(relativePath);
+                EventMetadata metadata = this.CreateEventMetadata(relativePath);
+                metadata.Add("Method", nameof(this.TryDehydrateFolderCoordinated));
+                this.context.Tracer.RelatedEvent(EventLevel.Informational, "DehydrateFolderCoordinated_Start", metadata);
+
+                // Step 1: Remove from databases first (so we can restore if needed)
+                removedPlaceholders = this.placeholderDatabase.RemoveAllEntriesForFolder(relativePath);
+                removedModifiedPaths = this.modifiedPaths.RemoveAllEntriesForFolder(relativePath);
+
+                // Step 2: Invalidate directory-specific projection cache
+                // This ensures that parent directory enumerations will not return the deleted directory
+                this.GitIndexProjection.InvalidateDirectoryProjection(relativePath);
+
+                // Step 3: Call the virtualizer to dehydrate with callback for cleanup
+                FileSystemResult result = this.fileSystemVirtualizer.DehydrateFolder(relativePath, () =>
+                {
+                    // This callback executes after enumeration blocking is complete but before unblocking
+                    // Step 4: Force a targeted projection update to ensure consistency
+                    this.GitIndexProjection.WaitForProjectionUpdate();
+
+                    EventMetadata successMetadata = this.CreateEventMetadata(relativePath);
+                    this.context.Tracer.RelatedEvent(EventLevel.Informational, "DehydrateFolderCoordinated_Success", successMetadata);
+                });
+                
+                if (result.Result != FSResult.Ok)
+                {
+                    errorMessage = $"FileSystemVirtualizer.DehydrateFolder failed with {result.Result}";
+                    this.context.Tracer.RelatedError(errorMessage);
+                }
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"{nameof(this.TryDehydrateFolderCoordinated)} threw an exception - {ex.Message}";
+                EventMetadata metadata = this.CreateEventMetadata(relativePath, ex);
+                this.context.Tracer.RelatedError(metadata, errorMessage);
+            }
+
+            // Restore data on failure (enumerations are automatically unblocked by virtualizer)
+            if (!string.IsNullOrEmpty(errorMessage))
+            {
+                if (removedPlaceholders != null)
+                {
+                    foreach (IPlaceholderData data in removedPlaceholders)
+                    {
+                        try
+                        {
+                            this.placeholderDatabase.AddPlaceholderData(data);
+                        }
+                        catch (Exception ex)
+                        {
+                            EventMetadata metadata = this.CreateEventMetadata(data.Path, ex);
+                            this.context.Tracer.RelatedError(metadata, $"{nameof(FileSystemCallbacks)}.{nameof(this.TryDehydrateFolderCoordinated)} failed to restore placeholder '{data.Path}'");
+                        }
+                    }
+                }
+
+                if (removedModifiedPaths != null)
+                {
+                    foreach (string modifiedPath in removedModifiedPaths)
+                    {
+                        if (!this.modifiedPaths.TryAdd(modifiedPath, isFolder: modifiedPath.EndsWith(GVFSConstants.GitPathSeparatorString), isRetryable: out bool isRetryable))
+                        {
+                            this.context.Tracer.RelatedError($"{nameof(FileSystemCallbacks)}.{nameof(this.TryDehydrateFolderCoordinated)}: failed to restore modified path '{modifiedPath}'");
+                        }
+                    }
+                }
+            }
+
+            return string.IsNullOrEmpty(errorMessage);
+        }
+
         public NamedPipeMessages.ReleaseLock.Response TryReleaseExternalLock(int pid)
         {
             return this.GitIndexProjection.TryReleaseExternalLock(pid);

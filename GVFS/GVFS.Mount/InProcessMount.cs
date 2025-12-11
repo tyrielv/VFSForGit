@@ -310,7 +310,8 @@ namespace GVFS.Mount
                 StringBuilder resetFolderPaths = new StringBuilder();
                 foreach (string folder in folders)
                 {
-                    if (this.fileSystemCallbacks.TryDehydrateFolder(folder, out string errorMessage))
+                    // Use the enhanced coordinated dehydration method
+                    if (this.fileSystemCallbacks.TryDehydrateFolderCoordinated(folder, out string errorMessage))
                     {
                         response.SuccessfulFolders.Add(folder);
                     }
