@@ -17,7 +17,7 @@ using System.Text;
 
 namespace GVFS.CommandLine
 {
-    [Verb(DehydrateVerb.DehydrateVerbName, HelpText = "EXPERIMENTAL FEATURE - Fully dehydrate a GVFS repo")]
+    [Verb(DehydrateVerb.DehydrateVerbName, HelpText = "EXPERIMENTAL FEATURE - Fully or partially dehydrate a GVFS repo")]
     public class DehydrateVerb : GVFSVerb.ForExistingEnlistment
     {
         private const string DehydrateVerbName = "dehydrate";
@@ -36,15 +36,24 @@ namespace GVFS.CommandLine
             "no-status",
             Default = false,
             Required = false,
-            HelpText = "Do not require a clean git status when dehydrating. To prevent data loss, this option cannot be combined with --folders option.")]
+            HelpText = "Do not require a clean git status when dehydrating.")]
         public bool NoStatus { get; set; }
 
         [Option(
             "folders",
             Default = "",
             Required = false,
-            HelpText = "A semicolon (" + FolderListSeparator + ") delimited list of folders to dehydrate. Each folder must be relative to the repository root.")]
-        public string Folders { get; set; }
+            HelpText = $@"A semicolon ({FolderListSeparator}) delimited list of folders to dehydrate.
+If not provided, all folders in the current directory will be dehydrated.
+Folders are relative to the current directory, unless prefixed with forward slash or backslash")]
+        public string FoldersArgument { get; set; }
+
+        [Option(
+            "full",
+            Default = false,
+            Required = false,
+            HelpText = "Dehydrate the entire src directory. Requires unmounting.")]
+        public bool FullDehydrate { get; set; }
 
         public string RunningVerbName { get; set; } = DehydrateVerbName;
         public string ActionName { get; set; } = DehydrateVerbName;
@@ -76,7 +85,8 @@ namespace GVFS.CommandLine
                         { "Confirmed", this.Confirmed },
                         { "NoStatus", this.NoStatus },
                         { "NamedPipeName", enlistment.NamedPipeName },
-                        { "Folders", this.Folders },
+                        { "Folders", this.FoldersArgument },
+                        { "Full", this.FullDehydrate },
                         { nameof(this.EnlistmentRootPathParameter), this.EnlistmentRootPathParameter },
                     });
 
@@ -112,9 +122,15 @@ namespace GVFS.CommandLine
                     }
                 }
 
-                bool fullDehydrate = string.IsNullOrEmpty(this.Folders);
+                if (this.FullDehydrate && !string.IsNullOrEmpty(this.FoldersArgument))
+                {
+                    this.Output.WriteLine("Cannot specify both --full and --folders options.");
+                    return;
+                }
 
-                if (!this.Confirmed && fullDehydrate)
+                string[] folders = DetermineFolders();
+
+                if (!this.Confirmed && this.FullDehydrate)
                 {
                     this.Output.WriteLine(
 $@"WARNING: THIS IS AN EXPERIMENTAL FEATURE
@@ -130,7 +146,7 @@ you want to keep. If you choose not to, you can still find your uncommitted chan
 in the backup folder, but it will be harder to find them because 'git status'
 will not work in the backup.
 
-To actually execute the dehydrate, run 'gvfs dehydrate --confirm' from {enlistment.EnlistmentRoot}.
+To actually execute the dehydrate, run 'gvfs dehydrate --confirm --full' from {enlistment.EnlistmentRoot}.
 ");
 
                     return;
@@ -141,7 +157,8 @@ To actually execute the dehydrate, run 'gvfs dehydrate --confirm' from {enlistme
 @"WARNING: THIS IS AN EXPERIMENTAL FEATURE
 
 All of your downloaded objects, branches, and siblings of the src folder
-will be preserved.  This will remove the folders specified and any working directory
+will be preserved.  This will remove the folders specified (or all folders
+under src if none are specified) and any working directory
 files and folders even if ignored by git similar to 'git clean -xdf <path>'.
 
 Before you dehydrate, you will have to commit any working directory changes
@@ -155,32 +172,36 @@ from a parent of the folders list.
                     return;
                 }
 
-                if (fullDehydrate && Environment.CurrentDirectory.StartsWith(enlistment.WorkingDirectoryBackingRoot))
+                if (this.FullDehydrate && Environment.CurrentDirectory.StartsWith(enlistment.WorkingDirectoryBackingRoot))
                 {
                     /* If running from /src, the dehydrate would fail because of the handle we are holding on it. */
                     this.Output.WriteLine($"Dehydrate must be run from {enlistment.EnlistmentRoot}");
                     return;
                 }
 
-                bool cleanStatus = this.StatusChecked || this.CheckGitStatus(tracer, enlistment, fullDehydrate);
+                bool cleanStatus = this.StatusChecked || this.CheckGitStatus(tracer, enlistment, this.FullDehydrate);
 
                 string backupRoot = Path.GetFullPath(Path.Combine(enlistment.EnlistmentRoot, "dehydrate_backup", DateTime.Now.ToString("yyyyMMdd_HHmmss")));
                 this.Output.WriteLine();
 
-                if (fullDehydrate)
+                if (this.FullDehydrate)
                 {
                     this.WriteMessage(tracer, $"Starting {this.RunningVerbName}. All of your existing files will be backed up in " + backupRoot);
                 }
-                else
+                else if (string.IsNullOrEmpty(this.FoldersArgument))
                 {
                     this.WriteMessage(tracer, $"Starting {this.RunningVerbName}. Selected folders will be backed up in " + backupRoot);
+                }
+                else
+                {
+                    this.WriteMessage(tracer, $"Starting {this.RunningVerbName}. All folders will be dehydrated and backed up in " + backupRoot);
                 }
 
                 this.WriteMessage(tracer, $"WARNING: If you abort the {this.RunningVerbName} after this point, the repo may become corrupt");
 
                 this.Output.WriteLine();
 
-                if (fullDehydrate)
+                if (this.FullDehydrate)
                 {
                     this.Unmount(tracer);
 
@@ -209,7 +230,7 @@ from a parent of the folders list.
                 }
                 else
                 {
-                    string[] folders = this.Folders.Split(new[] { FolderListSeparator }, StringSplitOptions.RemoveEmptyEntries);
+                    string[] folders = this.FoldersArgument.Split(new[] { FolderListSeparator }, StringSplitOptions.RemoveEmptyEntries);
 
                     if (folders.Length > 0)
                     {
@@ -227,6 +248,31 @@ from a parent of the folders list.
                         this.ReportErrorAndExit($"No folders to {this.ActionName}.");
                     }
                 }
+            }
+        }
+
+        private string[] DetermineFolders()
+        {
+            if (this.FullDehydrate)
+            {
+                return Array.Empty<string>();
+            }
+
+            IList<string> folderCandidates;
+            if (string.IsNullOrEmpty(this.FoldersArgument))
+            {
+                folderCandidates = new List<string>();
+                
+                foreach (string folder in Directory.GetDirectories(Environment.CurrentDirectory, "*", SearchOption.TopDirectoryOnly))
+                {
+                    string relativePath = 
+                    allFolders.Add(relativePath);
+                }
+                return allFolders.ToArray();
+            }
+            else
+            {
+                return this.FoldersArgument.Split(new[] { FolderListSeparator }, StringSplitOptions.RemoveEmptyEntries);
             }
         }
 

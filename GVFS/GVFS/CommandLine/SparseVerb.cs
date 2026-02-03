@@ -18,7 +18,7 @@ namespace GVFS.CommandLine
     [Verb(
         SparseVerb.SparseVerbName,
         HelpText = @"EXPERIMENTAL: List, add, or remove from the list of folders that are included in VFS for Git's projection.
-Folders need to be relative to the repos root directory.")
+FoldersArgument need to be relative to the repos root directory.")
     ]
     public class SparseVerb : GVFSVerb.ForExistingEnlistment
     {
@@ -442,7 +442,7 @@ Folders need to be relative to the repos root directory.")
                         verb.ActionName = PruneOptionName;
                         verb.Confirmed = true;
                         verb.StatusChecked = true;
-                        verb.Folders = string.Join(FolderListSeparator, directoriesToDehydrate);
+                        verb.FoldersArgument = string.Join(FolderListSeparator, directoriesToDehydrate);
                     },
                     this.Output);
 

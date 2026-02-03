@@ -26,6 +26,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <BaseOutputPath>$(ProjectOutPath)bin\</BaseOutputPath>
     <BaseIntermediateOutputPath>$(ProjectOutPath)obj\</BaseIntermediateOutputPath>
+    <LangVersion>10</LangVersion>
   </PropertyGroup>
 
   <!-- Native project properties -->

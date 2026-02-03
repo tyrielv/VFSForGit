@@ -125,7 +125,7 @@ namespace GVFS.CommandLine
                     EventMetadata metadata = new EventMetadata();
                     metadata.Add("Commits", this.Commits);
                     metadata.Add("Files", this.Files);
-                    metadata.Add("Folders", this.Folders);
+                    metadata.Add("FoldersArgument", this.Folders);
                     metadata.Add("FileListFile", this.FilesListFile);
                     metadata.Add("FoldersListFile", this.FoldersListFile);
                     metadata.Add("FilesFromStdIn", this.FilesFromStdIn);
