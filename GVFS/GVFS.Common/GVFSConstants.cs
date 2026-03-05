@@ -46,6 +46,9 @@ namespace GVFS.Common
 
             public const string ShowHydrationStatus = GVFSPrefix + "show-hydration-status";
             public const bool ShowHydrationStatusDefault = false;
+
+            public const string DehydrateOnCheckout = GVFSPrefix + "dehydrate-on-checkout";
+            public const bool DehydrateOnCheckoutDefault = false;
         }
 
         public static class LocalGVFSConfig
