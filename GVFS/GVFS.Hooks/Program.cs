@@ -56,6 +56,7 @@ namespace GVFS.Hooks
                 {
                     case PreCommandHook:
                         CheckForLegalCommands(args);
+                        TryDehydrateBeforeCheckout(args);
                         RunLockRequest(args, unattended, AcquireGVFSLockForProcess);
                         RunPreCommands(args);
                         break;
@@ -120,6 +121,107 @@ namespace GVFS.Hooks
             using (LibGit2RepoInvoker repo = new LibGit2RepoInvoker(NullTracer.Instance, normalizedCurrentDirectory))
             {
                 return repo.GetConfigBoolOrDefault(GVFSConstants.GitConfig.ShowHydrationStatus, GVFSConstants.GitConfig.ShowHydrationStatusDefault);
+            }
+        }
+
+        /// <summary>
+        /// Best-effort dehydrate before a branch-switching checkout.
+        /// Runs before the GVFS lock is acquired. On any failure,
+        /// allows the checkout to proceed normally.
+        /// </summary>
+        private static void TryDehydrateBeforeCheckout(string[] args)
+        {
+            try
+            {
+                string fullCommand = GenerateFullCommand(args);
+                GitCommandLineParser parser = new GitCommandLineParser(fullCommand);
+                if (!parser.TryGetBranchSwitchTarget(out string targetRef))
+                {
+                    return;
+                }
+
+                string headTreeSha;
+                string targetTreeSha;
+
+                using (LibGit2RepoInvoker repoInvoker = new LibGit2RepoInvoker(NullTracer.Instance, normalizedCurrentDirectory))
+                {
+                    if (!repoInvoker.GetConfigBoolOrDefault(GVFSConstants.GitConfig.DehydrateOnCheckout, GVFSConstants.GitConfig.DehydrateOnCheckoutDefault))
+                    {
+                        return;
+                    }
+
+                    // Use libgit2 to resolve HEAD and target tree SHAs
+                    if (!repoInvoker.TryInvoke(repo => repo.GetTreeSha("HEAD"), out headTreeSha) ||
+                        headTreeSha == null)
+                    {
+                        return;
+                    }
+
+                    if (!repoInvoker.TryInvoke(repo => repo.GetTreeSha(targetRef), out targetTreeSha) ||
+                        targetTreeSha == null)
+                    {
+                        return;
+                    }
+                }
+
+                if (string.Equals(headTreeSha, targetTreeSha, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Same tree, no churn
+                    return;
+                }
+
+                // TODO: Filter by hydration status — only dehydrate folders that
+                // actually have hydrated files (placeholder DB + modified paths).
+                // For now, dehydrate all root folders with differing tree SHAs.
+
+                // Compare root-level tree entries between HEAD and target
+                // Non-recursive ls-tree is fast — just lists top-level entries
+                Dictionary<string, string> headEntries = LsTreeParser.ParseTreeEntries(
+                    ProcessHelper.Run("git", $"ls-tree {headTreeSha}", redirectOutput: true));
+                Dictionary<string, string> targetEntries = LsTreeParser.ParseTreeEntries(
+                    ProcessHelper.Run("git", $"ls-tree {targetTreeSha}", redirectOutput: true));
+
+                if (headEntries.Count == 0 || targetEntries.Count == 0)
+                {
+                    return;
+                }
+
+                // Collect folders whose tree SHA differs
+                List<string> foldersToDehydrate = new List<string>();
+                foreach (KeyValuePair<string, string> entry in headEntries)
+                {
+                    targetEntries.TryGetValue(entry.Key, out string targetSha);
+                    if (!string.Equals(entry.Value, targetSha, StringComparison.OrdinalIgnoreCase))
+                    {
+                        foldersToDehydrate.Add(entry.Key);
+                    }
+                }
+
+                // Also include folders that exist in target but not HEAD
+                foreach (string folder in targetEntries.Keys)
+                {
+                    if (!headEntries.ContainsKey(folder))
+                    {
+                        foldersToDehydrate.Add(folder);
+                    }
+                }
+
+                if (foldersToDehydrate.Count == 0)
+                {
+                    return;
+                }
+
+                // Run gvfs dehydrate with the identified folders
+                string folderList = string.Join(";", foldersToDehydrate);
+                Console.WriteLine("Dehydrating before checkout...");
+                ProcessHelper.Run(
+                    "gvfs",
+                    $"dehydrate --confirm --folders \"{folderList}\"",
+                    redirectOutput: false);
+            }
+            catch (Exception)
+            {
+                // Best-effort: never block the checkout
             }
         }
 
