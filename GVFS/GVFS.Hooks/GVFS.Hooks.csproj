@@ -7,6 +7,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>GVFS.UnitTests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="LibGit2Sharp.NativeBinaries" Version="2.0.322" />
   </ItemGroup>
 
@@ -33,6 +39,9 @@
     </Compile>
     <Compile Include="..\GVFS.Common\Git\LibGit2RepoInvoker.cs">
       <Link>Common\Git\LibGit2RepoInvoker.cs</Link>
+    </Compile>
+    <Compile Include="..\GVFS.Common\GitCommandLineParser.cs">
+      <Link>Common\GitCommandLineParser.cs</Link>
     </Compile>
     <Compile Include="..\GVFS.Common\GVFSConstants.cs">
       <Link>Common\GVFSConstants.cs</Link>

@@ -16,6 +16,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\GVFS.Hooks\LsTreeParser.cs">
+      <Link>Hooks\LsTreeParser.cs</Link>
+    </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="NUnitLite" Version="3.12.0" />
     <PackageReference Include="NUnit3TestAdapter" Version="3.13.0" />
     <PackageReference Include="Moq" Version="4.10.1" />
