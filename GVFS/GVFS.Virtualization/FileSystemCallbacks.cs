@@ -116,7 +116,7 @@ namespace GVFS.Virtualization
             // This lets us from having to add null checks to callsites into GitStatusCache.
             this.gitStatusCache = gitStatusCache ?? new GitStatusCache(context, TimeSpan.Zero);
 
-            this.logsHeadPath = Path.Combine(this.context.Enlistment.WorkingDirectoryBackingRoot, GVFSConstants.DotGit.Logs.Head);
+            this.logsHeadPath = Path.Combine(this.context.Enlistment.DotGitRoot, "logs", "HEAD");
 
             EventMetadata metadata = new EventMetadata();
             metadata.Add("placeholders.Count", this.placeholderDatabase.GetCount());
