@@ -36,22 +36,47 @@ namespace GVFS.CommandLine
         {
             this.ValidatePathParameter(this.EnlistmentRootPathParameter);
 
-            string errorMessage;
+            string errorMessage = null;
             string root;
-            if (!GVFSPlatform.Instance.TryGetGVFSEnlistmentRoot(this.EnlistmentRootPathParameter, out root, out errorMessage))
+            string pipeName;
+
+            // Check for worktree first — a worktree path will walk up
+            // to find the primary .gvfs/ but needs its own pipe name.
+            string pathToCheck = string.IsNullOrEmpty(this.EnlistmentRootPathParameter)
+                ? System.Environment.CurrentDirectory
+                : this.EnlistmentRootPathParameter;
+
+            GVFSEnlistment.WorktreeInfo wtInfo = GVFSEnlistment.TryGetWorktreeInfo(pathToCheck);
+            if (wtInfo?.SharedGitDir != null)
+            {
+                string srcDir = System.IO.Path.GetDirectoryName(wtInfo.SharedGitDir);
+                root = srcDir != null ? System.IO.Path.GetDirectoryName(srcDir) : null;
+                if (root == null)
+                {
+                    this.ReportErrorAndExit("Error: could not determine enlistment root for worktree '{0}'", pathToCheck);
+                }
+
+                pipeName = GVFSPlatform.Instance.GetNamedPipeName(root) + wtInfo.PipeSuffix;
+            }
+            else if (!GVFSPlatform.Instance.TryGetGVFSEnlistmentRoot(this.EnlistmentRootPathParameter, out root, out errorMessage))
             {
                 this.ReportErrorAndExit(
                    "Error: '{0}' is not a valid GVFS enlistment",
                    this.EnlistmentRootPathParameter);
+                return;
+            }
+            else
+            {
+                pipeName = GVFSPlatform.Instance.GetNamedPipeName(root);
             }
 
             if (!this.SkipLock)
             {
-                this.AcquireLock(root);
+                this.AcquireLock(pipeName);
             }
 
             if (!this.ShowStatusWhileRunning(
-                () => { return this.Unmount(root, out errorMessage); },
+                () => { return this.Unmount(pipeName, out errorMessage); },
                 "Unmounting"))
             {
                 this.ReportErrorAndExit(errorMessage);
@@ -68,11 +93,9 @@ namespace GVFS.CommandLine
             }
         }
 
-        private bool Unmount(string enlistmentRoot, out string errorMessage)
+        private bool Unmount(string pipeName, out string errorMessage)
         {
             errorMessage = string.Empty;
-
-            string pipeName = GVFSPlatform.Instance.GetNamedPipeName(enlistmentRoot);
             string rawGetStatusResponse = string.Empty;
 
             try
@@ -197,9 +220,8 @@ namespace GVFS.CommandLine
             }
         }
 
-        private void AcquireLock(string enlistmentRoot)
+        private void AcquireLock(string pipeName)
         {
-            string pipeName = GVFSPlatform.Instance.GetNamedPipeName(enlistmentRoot);
             using (NamedPipeClient pipeClient = new NamedPipeClient(pipeName))
             {
                 try
@@ -220,7 +242,7 @@ namespace GVFS.CommandLine
                             GVFSPlatform.Instance.IsElevated(),
                             isConsoleOutputRedirectedToFile: GVFSPlatform.Instance.IsConsoleOutputRedirectedToFile(),
                             checkAvailabilityOnly: false,
-                            gvfsEnlistmentRoot: enlistmentRoot,
+                            gvfsEnlistmentRoot: null,
                             gitCommandSessionId: string.Empty,
                             result: out result))
                     {

@@ -62,7 +62,7 @@ namespace GVFS.Common
         public string WorkingDirectoryRoot { get; }
         public string WorkingDirectoryBackingRoot { get; }
 
-        public string DotGitRoot { get; private set; }
+        public string DotGitRoot { get; protected set; }
         public abstract string GitObjectsRoot { get; protected set; }
         public abstract string LocalObjectsRoot { get; protected set; }
         public abstract string GitPackRoot { get; protected set; }
