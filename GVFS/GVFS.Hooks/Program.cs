@@ -5,6 +5,7 @@ using GVFS.Common.Tracing;
 using GVFS.Hooks.HooksPlatform;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace GVFS.Hooks
@@ -18,6 +19,7 @@ namespace GVFS.Hooks
         private const int InvalidProcessId = -1;
 
         private const int PostCommandSpinnerDelayMs = 500;
+        private const int HydrationStatusTimeoutMs = 3000;
 
         private static string enlistmentRoot;
         private static string enlistmentPipename;
@@ -92,10 +94,12 @@ namespace GVFS.Hooks
                 case "status":
                     /* If status is being run to serialize for caching, or if --porcelain is specified, skip the health display */
                     if (!ArgsBlockHydrationStatus(args)
-                        && ConfigurationAllowsHydrationStatus())
+                        && ConfigurationAllowsHydrationStatus()
+                        && !IsHydrationStatusCircuitBreakerTripped())
                     {
-                        /* Display a message about the hydration status of the repo */
-                        ProcessHelper.Run("gvfs", "health --status", redirectOutput: false);
+                        /* Display a message about the hydration status of the repo.
+                         * Use a timeout to avoid blocking git status if the health check is slow. */
+                        ProcessHelper.Run("gvfs", "health --status", redirectOutput: false, timeoutMs: HydrationStatusTimeoutMs);
                     }
                     break;
             }
@@ -121,6 +125,15 @@ namespace GVFS.Hooks
             {
                 return repo.GetConfigBoolOrDefault(GVFSConstants.GitConfig.ShowHydrationStatus, GVFSConstants.GitConfig.ShowHydrationStatusDefault);
             }
+        }
+
+        private static bool IsHydrationStatusCircuitBreakerTripped()
+        {
+            string dotGVFSRoot = Path.Combine(enlistmentRoot, ".gvfs");
+            HydrationStatusCircuitBreaker circuitBreaker = new HydrationStatusCircuitBreaker(
+                dotGVFSRoot,
+                NullTracer.Instance);
+            return circuitBreaker.IsDisabled();
         }
 
         private static void ExitWithError(params string[] messages)

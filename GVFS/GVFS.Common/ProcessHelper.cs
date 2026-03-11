@@ -8,9 +8,21 @@ namespace GVFS.Common
 {
     public static class ProcessHelper
     {
+        public const int TimedOutExitCode = -1;
+
         private static string currentProcessVersion = null;
 
         public static ProcessResult Run(string programName, string args, bool redirectOutput = true)
+        {
+            return Run(programName, args, redirectOutput, timeoutMs: -1);
+        }
+
+        /// <summary>
+        /// Runs a process with an optional timeout. If the process does not exit within
+        /// <paramref name="timeoutMs"/> milliseconds, it is killed and a failure result is returned.
+        /// Pass -1 for no timeout.
+        /// </summary>
+        public static ProcessResult Run(string programName, string args, bool redirectOutput, int timeoutMs)
         {
             ProcessStartInfo processInfo = new ProcessStartInfo(programName);
             processInfo.UseShellExecute = false;
@@ -21,7 +33,7 @@ namespace GVFS.Common
             processInfo.CreateNoWindow = redirectOutput;
             processInfo.Arguments = args;
 
-            return Run(processInfo);
+            return Run(processInfo, timeoutMs: timeoutMs);
         }
 
         public static string GetCurrentProcessLocation()
@@ -90,7 +102,7 @@ namespace GVFS.Common
             }
         }
 
-        public static ProcessResult Run(ProcessStartInfo processInfo, string errorMsgDelimeter = "\r\n", object executionLock = null)
+        public static ProcessResult Run(ProcessStartInfo processInfo, string errorMsgDelimeter = "\r\n", object executionLock = null, int timeoutMs = -1)
         {
             using (Process executingProcess = new Process())
             {
@@ -113,19 +125,25 @@ namespace GVFS.Common
                 {
                     lock (executionLock)
                     {
-                        output = StartProcess(executingProcess);
+                        output = StartProcess(executingProcess, timeoutMs);
                     }
                 }
                 else
                 {
-                    output = StartProcess(executingProcess);
+                    output = StartProcess(executingProcess, timeoutMs);
                 }
 
-                return new ProcessResult(output.ToString(), errors.ToString(), executingProcess.ExitCode);
+                if (executingProcess.HasExited)
+                {
+                    return new ProcessResult(output, errors, executingProcess.ExitCode);
+                }
+
+                // Process was killed due to timeout
+                return new ProcessResult(output, errors, TimedOutExitCode);
             }
         }
 
-        private static string StartProcess(Process executingProcess)
+        private static string StartProcess(Process executingProcess, int timeoutMs = -1)
         {
             executingProcess.Start();
 
@@ -140,7 +158,26 @@ namespace GVFS.Common
                 output = executingProcess.StandardOutput.ReadToEnd();
             }
 
-            executingProcess.WaitForExit();
+            if (timeoutMs >= 0)
+            {
+                if (!executingProcess.WaitForExit(timeoutMs))
+                {
+                    try
+                    {
+                        executingProcess.Kill();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Process already exited between WaitForExit and Kill
+                    }
+
+                    return output;
+                }
+            }
+            else
+            {
+                executingProcess.WaitForExit();
+            }
 
             return output;
         }

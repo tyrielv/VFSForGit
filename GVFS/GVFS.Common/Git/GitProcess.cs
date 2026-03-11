@@ -619,12 +619,13 @@ namespace GVFS.Common.Git
             return this.InvokeGitAgainstDotGitFolder("cat-file -t " + objectId);
         }
 
-        public Result LsTree(string treeish, Action<string> parseStdOutLine, bool recursive, bool showAllTrees = false, bool showDirectories = false)
+        public Result LsTree(string treeish, Action<string> parseStdOutLine, bool recursive, bool showAllTrees = false, bool showDirectories = false, int timeoutMs = -1)
         {
             return this.InvokeGitAgainstDotGitFolder(
                 "ls-tree " + (recursive ? "-r " : string.Empty) + (showAllTrees ? "-t " : string.Empty) + (showDirectories ? "-d " : string.Empty) + treeish,
                 null,
-                parseStdOutLine);
+                parseStdOutLine,
+                timeoutMs: timeoutMs);
         }
 
         public Result LsFiles(Action<string> parseStdOutLine)
@@ -682,9 +683,9 @@ namespace GVFS.Common.Git
             return this.InvokeGitAgainstDotGitFolder($"-c pack.threads=1 -c repack.packKeptObjects=true multi-pack-index repack --object-dir=\"{gitObjectDirectory}\" --batch-size={batchSize} --no-progress");
         }
 
-        public Result GetHeadTreeId()
+        public Result GetHeadTreeId(int timeoutMs = -1)
         {
-            return this.InvokeGitAgainstDotGitFolder("rev-parse \"HEAD^{tree}\"", usePreCommandHook: false);
+            return this.InvokeGitAgainstDotGitFolder("rev-parse \"HEAD^{tree}\"", null, null, usePreCommandHook: false, timeoutMs: timeoutMs);
         }
 
         public Process GetGitProcess(string command, string workingDirectory, string dotGitDirectory, bool useReadObjectHook, bool redirectStandardError, string gitObjectsDirectory, bool usePreCommandHook)
@@ -937,7 +938,8 @@ namespace GVFS.Common.Git
             Action<StreamWriter> writeStdIn,
             Action<string> parseStdOutLine,
             bool usePreCommandHook = true,
-            string gitObjectsDirectory = null)
+            string gitObjectsDirectory = null,
+            int timeoutMs = -1)
         {
             // This git command should not need/use the working directory of the repo.
             // Run git.exe in Environment.SystemDirectory to ensure the git.exe process
@@ -949,7 +951,7 @@ namespace GVFS.Common.Git
                 useReadObjectHook: false,
                 writeStdIn: writeStdIn,
                 parseStdOutLine: parseStdOutLine,
-                timeoutMs: -1,
+                timeoutMs: timeoutMs,
                 gitObjectsDirectory: gitObjectsDirectory,
                 usePreCommandHook: usePreCommandHook);
         }
