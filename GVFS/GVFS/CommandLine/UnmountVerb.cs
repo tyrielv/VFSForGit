@@ -46,6 +46,7 @@ namespace GVFS.CommandLine
                 ? System.Environment.CurrentDirectory
                 : this.EnlistmentRootPathParameter;
 
+            string registrationPath;
             GVFSEnlistment.WorktreeInfo wtInfo = GVFSEnlistment.TryGetWorktreeInfo(pathToCheck);
             if (wtInfo?.SharedGitDir != null)
             {
@@ -57,6 +58,10 @@ namespace GVFS.CommandLine
                 }
 
                 pipeName = GVFSPlatform.Instance.GetNamedPipeName(root) + wtInfo.PipeSuffix;
+
+                // Worktree mounts register with their worktree path,
+                // so unregister with the same path — not the primary root.
+                registrationPath = wtInfo.WorktreePath;
             }
             else if (!GVFSPlatform.Instance.TryGetGVFSEnlistmentRoot(this.EnlistmentRootPathParameter, out root, out errorMessage))
             {
@@ -68,6 +73,7 @@ namespace GVFS.CommandLine
             else
             {
                 pipeName = GVFSPlatform.Instance.GetNamedPipeName(root);
+                registrationPath = root;
             }
 
             if (!this.SkipLock)
@@ -85,7 +91,7 @@ namespace GVFS.CommandLine
             if (!this.Unattended && !this.SkipUnregister)
             {
                 if (!this.ShowStatusWhileRunning(
-                    () => { return this.UnregisterRepo(root, out errorMessage); },
+                    () => { return this.UnregisterRepo(registrationPath, out errorMessage); },
                     "Unregistering automount"))
                 {
                     this.Output.WriteLine("    WARNING: " + errorMessage);

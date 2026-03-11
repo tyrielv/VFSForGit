@@ -237,7 +237,12 @@ namespace GVFS.CommandLine
             errorMessage = string.Empty;
 
             NamedPipeMessages.RegisterRepoRequest request = new NamedPipeMessages.RegisterRepoRequest();
-            request.EnlistmentRoot = enlistment.EnlistmentRoot;
+
+            // Worktree mounts register with their worktree path so they can be
+            // listed and unregistered independently of the primary enlistment.
+            request.EnlistmentRoot = enlistment.IsWorktree
+                ? enlistment.WorkingDirectoryRoot
+                : enlistment.EnlistmentRoot;
 
             request.OwnerSID = GVFSPlatform.Instance.GetCurrentUser();
 
