@@ -187,6 +187,7 @@ namespace GVFS.Hooks
                     MountNewWorktree(args);
                     break;
                 case "remove":
+                    RemountWorktreeIfRemoveFailed(args);
                     CleanupSkipCleanCheckMarker(args);
                     break;
                 case "move":
@@ -209,6 +210,28 @@ namespace GVFS.Hooks
 
             string fullPath = ResolvePath(worktreePath);
             UnmountWorktree(fullPath);
+        }
+
+        /// <summary>
+        /// If the worktree directory and its .git file both still exist after
+        /// git worktree remove, the removal failed completely. Remount ProjFS
+        /// so the worktree remains usable. If the remove partially succeeded
+        /// (e.g., .git file or gitdir removed), don't attempt recovery.
+        /// </summary>
+        private static void RemountWorktreeIfRemoveFailed(string[] args)
+        {
+            string worktreePath = GetWorktreePathArg(args);
+            if (string.IsNullOrEmpty(worktreePath))
+            {
+                return;
+            }
+
+            string fullPath = ResolvePath(worktreePath);
+            string dotGitFile = Path.Combine(fullPath, ".git");
+            if (Directory.Exists(fullPath) && File.Exists(dotGitFile))
+            {
+                ProcessHelper.Run("gvfs", $"mount \"{fullPath}\"", redirectOutput: false);
+            }
         }
 
         /// <summary>
@@ -405,7 +428,7 @@ namespace GVFS.Hooks
                 return;
             }
 
-            string worktreesDir = Path.Combine(enlistmentRoot, ".git", "worktrees");
+            string worktreesDir = Path.Combine(enlistmentRoot, "src", ".git", "worktrees");
             if (!Directory.Exists(worktreesDir))
             {
                 return;
