@@ -2,6 +2,7 @@
 using GVFS.Common.Git;
 using GVFS.Common.Tracing;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 
@@ -44,17 +45,27 @@ namespace GVFS.Common
             PhysicalFileSystem fileSystem,
             ITracer tracer)
         {
+            Stopwatch totalStopwatch = Stopwatch.StartNew();
+            Stopwatch phaseStopwatch = new Stopwatch();
+
             try
             {
                 /* Getting all the file paths from git index is slow and we only need the total count,
                  * so we read the index file header instead of calling GetPathsFromGitIndex */
+                phaseStopwatch.Restart();
                 int totalFileCount = GetIndexFileCount(enlistment, fileSystem);
+                long indexReadMs = phaseStopwatch.ElapsedMilliseconds;
 
                 EnlistmentPathData pathData = new EnlistmentPathData();
 
                 /* FUTURE: These could be optimized to only deal with counts instead of full path lists */
+                phaseStopwatch.Restart();
                 pathData.LoadPlaceholdersFromDatabase(enlistment);
+                long placeholderLoadMs = phaseStopwatch.ElapsedMilliseconds;
+
+                phaseStopwatch.Restart();
                 pathData.LoadModifiedPaths(enlistment);
+                long modifiedPathsLoadMs = phaseStopwatch.ElapsedMilliseconds;
 
                 int hydratedFileCount = pathData.ModifiedFilePaths.Count + pathData.PlaceholderFilePaths.Count;
                 int hydratedFolderCount = pathData.ModifiedFolderPaths.Count + pathData.PlaceholderFolderPaths.Count;
@@ -73,13 +84,22 @@ namespace GVFS.Common
                 if (!soFar.IsValid)
                 {
                     soFar.TotalFolderCount = 0; // Set to default invalid value to avoid confusion with the dummy value above.
+                    tracer.RelatedWarning(
+                        $"Hydration summary early exit: data invalid before tree count. " +
+                        $"TotalFileCount={totalFileCount}, HydratedFileCount={hydratedFileCount}, " +
+                        $"HydratedFolderCount={hydratedFolderCount}");
+                    EmitDurationTelemetry(tracer, totalStopwatch.ElapsedMilliseconds, indexReadMs, placeholderLoadMs, modifiedPathsLoadMs, treeCountMs: 0, earlyExit: true);
                     return soFar;
                 }
 
                 /* Getting all the directories is also slow, but not as slow as reading the entire index,
                  * GetTotalPathCount caches the count so this is only slow occasionally,
                  * and the GitStatusCache manager also calls this to ensure it is updated frequently. */
+                phaseStopwatch.Restart();
                 int totalFolderCount = GetHeadTreeCount(enlistment, fileSystem, tracer);
+                long treeCountMs = phaseStopwatch.ElapsedMilliseconds;
+
+                EmitDurationTelemetry(tracer, totalStopwatch.ElapsedMilliseconds, indexReadMs, placeholderLoadMs, modifiedPathsLoadMs, treeCountMs, earlyExit: false);
 
                 return new EnlistmentHydrationSummary()
                 {
@@ -91,6 +111,7 @@ namespace GVFS.Common
             }
             catch (Exception e)
             {
+                tracer.RelatedError($"Hydration summary failed with exception after {totalStopwatch.ElapsedMilliseconds}ms: {e.Message}");
                 return new EnlistmentHydrationSummary()
                 {
                     HydratedFileCount = -1,
@@ -100,6 +121,29 @@ namespace GVFS.Common
                     Error = e,
                 };
             }
+        }
+
+        private static void EmitDurationTelemetry(
+            ITracer tracer,
+            long totalMs,
+            long indexReadMs,
+            long placeholderLoadMs,
+            long modifiedPathsLoadMs,
+            long treeCountMs,
+            bool earlyExit)
+        {
+            EventMetadata metadata = new EventMetadata();
+            metadata["TotalMs"] = totalMs;
+            metadata["IndexReadMs"] = indexReadMs;
+            metadata["PlaceholderLoadMs"] = placeholderLoadMs;
+            metadata["ModifiedPathsLoadMs"] = modifiedPathsLoadMs;
+            metadata["TreeCountMs"] = treeCountMs;
+            metadata["EarlyExit"] = earlyExit;
+            tracer.RelatedEvent(
+                EventLevel.Informational,
+                "HydrationSummaryDuration",
+                metadata,
+                Keywords.Telemetry);
         }
 
         /// <summary>
