@@ -64,7 +64,7 @@ namespace GVFS.Common
                 long placeholderLoadMs = phaseStopwatch.ElapsedMilliseconds;
 
                 phaseStopwatch.Restart();
-                pathData.LoadModifiedPaths(enlistment);
+                pathData.LoadModifiedPaths(enlistment, tracer);
                 long modifiedPathsLoadMs = phaseStopwatch.ElapsedMilliseconds;
 
                 int hydratedFileCount = pathData.ModifiedFilePaths.Count + pathData.PlaceholderFilePaths.Count;
