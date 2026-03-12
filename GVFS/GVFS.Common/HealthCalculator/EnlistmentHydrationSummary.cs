@@ -131,6 +131,8 @@ namespace GVFS.Common
             }
         }
 
+        private const int GitProcessTimeoutMs = 15000;
+
         /// <summary>
         /// Get the total number of trees in the repo at HEAD.
         /// </summary>
@@ -138,6 +140,7 @@ namespace GVFS.Common
         /// This is used as the denominator in displaying percentage of hydrated
         /// directories as part of git status pre-command hook.
         /// It can take several seconds to calculate, so we cache it near the git status cache.
+        /// Git processes are given a 15-second timeout to prevent hangs.
         /// </remarks>
         /// <returns>
         /// The number of subtrees at HEAD, which may be 0.
@@ -146,7 +149,7 @@ namespace GVFS.Common
         internal static int GetHeadTreeCount(GVFSEnlistment enlistment, PhysicalFileSystem fileSystem, ITracer tracer)
         {
             var gitProcess = enlistment.CreateGitProcess();
-            var headResult = gitProcess.GetHeadTreeId();
+            var headResult = gitProcess.GetHeadTreeId(timeoutMs: GitProcessTimeoutMs);
             if (headResult.ExitCodeIsFailure)
             {
                 tracer.RelatedError($"Failed to get HEAD tree ID: \nOutput: {headResult.Output}\n\nError:{headResult.Errors}");
@@ -182,7 +185,8 @@ namespace GVFS.Common
                 GVFSConstants.DotGit.HeadName,
                 line => totalPathCount++,
                 recursive: true,
-                showDirectories: true);
+                showDirectories: true,
+                timeoutMs: GitProcessTimeoutMs);
 
             if (GitProcess.Result.SuccessCode != folderResult.ExitCode)
             {

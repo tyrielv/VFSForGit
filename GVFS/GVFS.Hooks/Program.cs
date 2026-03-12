@@ -18,6 +18,7 @@ namespace GVFS.Hooks
         private const int InvalidProcessId = -1;
 
         private const int PostCommandSpinnerDelayMs = 500;
+        private const int HydrationStatusTimeoutMs = 3000;
 
         private static string enlistmentRoot;
         private static string enlistmentPipename;
@@ -94,8 +95,9 @@ namespace GVFS.Hooks
                     if (!ArgsBlockHydrationStatus(args)
                         && ConfigurationAllowsHydrationStatus())
                     {
-                        /* Display a message about the hydration status of the repo */
-                        ProcessHelper.Run("gvfs", "health --status", redirectOutput: false);
+                        /* Display a message about the hydration status of the repo.
+                         * Use a timeout to avoid blocking git status if the health check is slow. */
+                        ProcessHelper.Run("gvfs", "health --status", redirectOutput: false, timeoutMs: HydrationStatusTimeoutMs);
                     }
                     break;
             }
