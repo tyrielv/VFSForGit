@@ -47,6 +47,7 @@ namespace GVFS.Common
         private bool isStopping;
         private bool isInitialized;
         private StatusStatistics statistics;
+        private CancellationTokenSource shutdownTokenSource;
 
         private volatile EnlistmentHydrationSummary cachedHydrationSummary;
 
@@ -67,6 +68,7 @@ namespace GVFS.Common
             this.backoffTime = backoffTime;
             this.serializedGitStatusFilePath = this.context.Enlistment.GitStatusCachePath;
             this.statistics = new StatusStatistics();
+            this.shutdownTokenSource = new CancellationTokenSource();
 
             this.wakeUpThread = new AutoResetEvent(false);
         }
@@ -81,6 +83,7 @@ namespace GVFS.Common
         public virtual void Shutdown()
         {
             this.isStopping = true;
+            this.shutdownTokenSource.Cancel();
 
             if (this.isInitialized && this.updateStatusCacheThread != null)
             {
@@ -187,6 +190,12 @@ namespace GVFS.Common
         public virtual void Dispose()
         {
             this.Shutdown();
+
+            if (this.shutdownTokenSource != null)
+            {
+                this.shutdownTokenSource.Dispose();
+                this.shutdownTokenSource = null;
+            }
 
             if (this.wakeUpThread != null)
             {
@@ -376,7 +385,7 @@ namespace GVFS.Common
                  * and this is also a convenient place to log telemetry for it.
                  */
                 EnlistmentHydrationSummary hydrationSummary =
-                    EnlistmentHydrationSummary.CreateSummary(this.context.Enlistment, this.context.FileSystem, this.context.Tracer);
+                    EnlistmentHydrationSummary.CreateSummary(this.context.Enlistment, this.context.FileSystem, this.context.Tracer, this.shutdownTokenSource.Token);
                 EventMetadata metadata = new EventMetadata();
                 metadata.Add("Area", EtwArea);
                 if (hydrationSummary.IsValid)
