@@ -10,19 +10,26 @@ namespace GVFS.Common
 {
     public class EnlistmentHydrationSummary
     {
-        public int HydratedFileCount { get; private set; }
+        public int PlaceholderFileCount { get; private set; }
+        public int PlaceholderFolderCount { get; private set; }
+        public int ModifiedFileCount { get; private set; }
+        public int ModifiedFolderCount { get; private set; }
         public int TotalFileCount { get; private set; }
-        public int HydratedFolderCount { get; private set; }
         public int TotalFolderCount { get; private set; }
         public Exception Error { get; private set; } = null;
+
+        public int HydratedFileCount => PlaceholderFileCount + ModifiedFileCount;
+        public int HydratedFolderCount => PlaceholderFolderCount + ModifiedFolderCount;
 
 
         public bool IsValid
         {
             get
             {
-                return HydratedFileCount >= 0
-                && HydratedFolderCount >= 0
+                return PlaceholderFileCount >= 0
+                && PlaceholderFolderCount >= 0
+                && ModifiedFileCount >= 0
+                && ModifiedFolderCount >= 0
                 && TotalFileCount >= HydratedFileCount
                 && TotalFolderCount >= HydratedFolderCount;
             }
@@ -67,18 +74,22 @@ namespace GVFS.Common
                 pathData.LoadModifiedPaths(enlistment, tracer);
                 long modifiedPathsLoadMs = phaseStopwatch.ElapsedMilliseconds;
 
-                int hydratedFileCount = pathData.ModifiedFilePaths.Count + pathData.PlaceholderFilePaths.Count;
-                int hydratedFolderCount = pathData.ModifiedFolderPaths.Count + pathData.PlaceholderFolderPaths.Count;
+                int placeholderFileCount = pathData.PlaceholderFilePaths.Count;
+                int placeholderFolderCount = pathData.PlaceholderFolderPaths.Count;
+                int modifiedFileCount = pathData.ModifiedFilePaths.Count;
+                int modifiedFolderCount = pathData.ModifiedFolderPaths.Count;
 
                 /* Getting the head tree count (used for TotalFolderCount) is potentially slower than the other parts
                  * of the operation, so we do it last and check that the other parts would succeed before running it.
                  */
                 var soFar = new EnlistmentHydrationSummary()
                 {
-                    HydratedFileCount = hydratedFileCount,
-                    HydratedFolderCount = hydratedFolderCount,
+                    PlaceholderFileCount = placeholderFileCount,
+                    PlaceholderFolderCount = placeholderFolderCount,
+                    ModifiedFileCount = modifiedFileCount,
+                    ModifiedFolderCount = modifiedFolderCount,
                     TotalFileCount = totalFileCount,
-                    TotalFolderCount = hydratedFolderCount + 1, // Not calculated yet, use a dummy valid value.
+                    TotalFolderCount = placeholderFolderCount + modifiedFolderCount + 1, // Not calculated yet, use a dummy valid value.
                 };
 
                 if (!soFar.IsValid)
@@ -86,8 +97,9 @@ namespace GVFS.Common
                     soFar.TotalFolderCount = 0; // Set to default invalid value to avoid confusion with the dummy value above.
                     tracer.RelatedWarning(
                         $"Hydration summary early exit: data invalid before tree count. " +
-                        $"TotalFileCount={totalFileCount}, HydratedFileCount={hydratedFileCount}, " +
-                        $"HydratedFolderCount={hydratedFolderCount}");
+                        $"TotalFileCount={totalFileCount}, PlaceholderFileCount={placeholderFileCount}, " +
+                        $"ModifiedFileCount={modifiedFileCount}, PlaceholderFolderCount={placeholderFolderCount}, " +
+                        $"ModifiedFolderCount={modifiedFolderCount}");
                     EmitDurationTelemetry(tracer, totalStopwatch.ElapsedMilliseconds, indexReadMs, placeholderLoadMs, modifiedPathsLoadMs, treeCountMs: 0, earlyExit: true);
                     return soFar;
                 }
@@ -103,8 +115,10 @@ namespace GVFS.Common
 
                 return new EnlistmentHydrationSummary()
                 {
-                    HydratedFileCount = hydratedFileCount,
-                    HydratedFolderCount = hydratedFolderCount,
+                    PlaceholderFileCount = placeholderFileCount,
+                    PlaceholderFolderCount = placeholderFolderCount,
+                    ModifiedFileCount = modifiedFileCount,
+                    ModifiedFolderCount = modifiedFolderCount,
                     TotalFileCount = totalFileCount,
                     TotalFolderCount = totalFolderCount,
                 };
@@ -114,8 +128,10 @@ namespace GVFS.Common
                 tracer.RelatedError($"Hydration summary failed with exception after {totalStopwatch.ElapsedMilliseconds}ms: {e.Message}");
                 return new EnlistmentHydrationSummary()
                 {
-                    HydratedFileCount = -1,
-                    HydratedFolderCount = -1,
+                    PlaceholderFileCount = -1,
+                    PlaceholderFolderCount = -1,
+                    ModifiedFileCount = -1,
+                    ModifiedFolderCount = -1,
                     TotalFileCount = -1,
                     TotalFolderCount = -1,
                     Error = e,

@@ -397,6 +397,11 @@ namespace GVFS.Virtualization
             }
         }
 
+        public EnlistmentHydrationSummary GetCachedHydrationSummary()
+        {
+            return this.gitStatusCache.GetCachedHydrationSummary();
+        }
+
         public virtual void OnLogsHeadChange()
         {
             // Don't open the .git\logs\HEAD file here to check its attributes as we're in a callback for the .git folder

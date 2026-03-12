@@ -46,8 +46,8 @@
     <Compile Include="..\GVFS.Common\NamedPipes\BrokenPipeException.cs">
       <Link>Common\NamedPipes\BrokenPipeException.cs</Link>
     </Compile>
-    <Compile Include="..\GVFS.Common\NamedPipes\LockNamedPipeMessages.cs">
-      <Link>Common\NamedPipes\LockNamedPipeMessages.cs</Link>
+    <Compile Include="..\GVFS.Common\NamedPipes\SharedNamedPipeMessages.cs">
+      <Link>Common\NamedPipes\SharedNamedPipeMessages.cs</Link>
     </Compile>
     <Compile Include="..\GVFS.Common\NamedPipes\NamedPipeClient.cs">
       <Link>Common\NamedPipes\NamedPipeClient.cs</Link>

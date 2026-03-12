@@ -48,6 +48,8 @@ namespace GVFS.Common
         private bool isInitialized;
         private StatusStatistics statistics;
 
+        private volatile EnlistmentHydrationSummary cachedHydrationSummary;
+
         private volatile CacheState cacheState = CacheState.Dirty;
 
         private object cacheFileLock = new object();
@@ -111,6 +113,15 @@ namespace GVFS.Common
         public void RefreshAndWait()
         {
             this.RebuildStatusCacheIfNeeded(ignoreBackoff: true);
+        }
+
+        /// <summary>
+        /// Returns the cached hydration summary if one has been computed,
+        /// or null if no valid summary is available yet.
+        /// </summary>
+        public EnlistmentHydrationSummary GetCachedHydrationSummary()
+        {
+            return this.cachedHydrationSummary;
         }
 
         /// <summary>
@@ -370,6 +381,8 @@ namespace GVFS.Common
                 metadata.Add("Area", EtwArea);
                 if (hydrationSummary.IsValid)
                 {
+                    this.cachedHydrationSummary = hydrationSummary;
+
                     metadata[nameof(hydrationSummary.TotalFolderCount)] = hydrationSummary.TotalFolderCount;
                     metadata[nameof(hydrationSummary.TotalFileCount)] = hydrationSummary.TotalFileCount;
                     metadata[nameof(hydrationSummary.HydratedFolderCount)] = hydrationSummary.HydratedFolderCount;
