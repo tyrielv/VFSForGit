@@ -1,0 +1,329 @@
+using GVFS.Common;
+using GVFS.Common.Git;
+using GVFS.Common.NamedPipes;
+using GVFS.Common.Tracing;
+using GVFS.Tests.Should;
+using GVFS.UnitTests.Mock.Common;
+using GVFS.UnitTests.Mock.FileSystem;
+using GVFS.UnitTests.Mock.Git;
+using NUnit.Framework;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+
+namespace GVFS.UnitTests.Common
+{
+    [TestFixture]
+    public class HydrationStatusErrorPathTests
+    {
+        private const string HeadTreeId = "0123456789012345678901234567890123456789";
+        private const int HeadPathCount = 42;
+
+        private MockFileSystem fileSystem;
+        private MockGitProcess gitProcess;
+        private MockTracer tracer;
+        private GVFSContext context;
+        private string gitParentPath;
+        private string gvfsMetadataPath;
+        private MockDirectory enlistmentDirectory;
+
+        [SetUp]
+        public void Setup()
+        {
+            this.tracer = new MockTracer();
+
+            string enlistmentRoot = Path.Combine("mock:", "GVFS", "UnitTests", "Repo");
+            string statusCachePath = Path.Combine("mock:", "GVFS", "UnitTests", "Repo", GVFSPlatform.Instance.Constants.DotGVFSRoot, "gitStatusCache");
+
+            this.gitProcess = new MockGitProcess();
+            this.gitProcess.SetExpectedCommandResult($"--no-optional-locks status \"--serialize={statusCachePath}", () => new GitProcess.Result(string.Empty, string.Empty, 0), true);
+            MockGVFSEnlistment enlistment = new MockGVFSEnlistment(enlistmentRoot, "fake://repoUrl", "fake://gitBinPath", this.gitProcess);
+            enlistment.InitializeCachePathsFromKey("fake:\\gvfsSharedCache", "fakeCacheKey");
+
+            this.gitParentPath = enlistment.WorkingDirectoryBackingRoot;
+            this.gvfsMetadataPath = enlistment.DotGVFSRoot;
+
+            this.enlistmentDirectory = new MockDirectory(
+                enlistmentRoot,
+                new MockDirectory[]
+                {
+                    new MockDirectory(this.gitParentPath, folders: null, files: null),
+                },
+                null);
+
+            this.enlistmentDirectory.CreateFile(Path.Combine(this.gitParentPath, ".git", "config"), ".git config Contents", createDirectories: true);
+            this.enlistmentDirectory.CreateFile(Path.Combine(this.gitParentPath, ".git", "HEAD"), ".git HEAD Contents", createDirectories: true);
+            this.enlistmentDirectory.CreateFile(Path.Combine(this.gitParentPath, ".git", "logs", "HEAD"), "HEAD Contents", createDirectories: true);
+            this.enlistmentDirectory.CreateFile(Path.Combine(this.gitParentPath, ".git", "info", "always_exclude"), "always_exclude Contents", createDirectories: true);
+            this.enlistmentDirectory.CreateDirectory(Path.Combine(this.gitParentPath, ".git", "objects", "pack"));
+
+            this.fileSystem = new MockFileSystem(this.enlistmentDirectory);
+            this.fileSystem.AllowMoveFile = true;
+            this.fileSystem.DeleteNonExistentFileThrowsException = false;
+
+            this.context = new GVFSContext(
+                this.tracer,
+                this.fileSystem,
+                new MockGitRepo(this.tracer, enlistment, this.fileSystem),
+                enlistment);
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            this.fileSystem = null;
+            this.gitProcess = null;
+            this.tracer = null;
+            this.context = null;
+        }
+
+        #region GetHeadTreeCount error paths
+
+        [TestCase]
+        public void GetHeadTreeCount_RevParseFails_ReturnsZero()
+        {
+            this.gitProcess.SetExpectedCommandResult(
+                "rev-parse \"HEAD^{tree}\"",
+                () => new GitProcess.Result("", "fatal: not a git repository", GitProcess.Result.GenericFailureCode));
+
+            int result = EnlistmentHydrationSummary.GetHeadTreeCount(
+                this.context.Enlistment, this.context.FileSystem, this.context.Tracer);
+
+            Assert.AreEqual(0, result);
+            this.tracer.RelatedErrorEvents.Count.ShouldBeAtLeast(1);
+        }
+
+        [TestCase]
+        public void GetHeadTreeCount_LsTreeFails_ReturnsZero()
+        {
+            this.gitProcess.SetExpectedCommandResult(
+                "rev-parse \"HEAD^{tree}\"",
+                () => new GitProcess.Result(HeadTreeId, "", 0));
+            this.gitProcess.SetExpectedCommandResult(
+                "ls-tree -r -d HEAD",
+                () => new GitProcess.Result("", "fatal: bad tree object", GitProcess.Result.GenericFailureCode));
+
+            int result = EnlistmentHydrationSummary.GetHeadTreeCount(
+                this.context.Enlistment, this.context.FileSystem, this.context.Tracer);
+
+            Assert.AreEqual(0, result);
+            this.tracer.RelatedErrorEvents.Count.ShouldBeAtLeast(1);
+        }
+
+        [TestCase]
+        public void GetHeadTreeCount_CacheWriteFails_StillReturnsCount()
+        {
+            this.gitProcess.SetExpectedCommandResult(
+                "rev-parse \"HEAD^{tree}\"",
+                () => new GitProcess.Result(HeadTreeId, "", 0));
+            this.gitProcess.SetExpectedCommandResult(
+                "ls-tree -r -d HEAD",
+                () => new GitProcess.Result(
+                    string.Join("\n", Enumerable.Range(0, HeadPathCount).Select(x => x.ToString())),
+                    "", 0));
+
+            this.fileSystem.ExceptionThrownByCreateDirectory = new IOException("Permission denied");
+
+            int result = EnlistmentHydrationSummary.GetHeadTreeCount(
+                this.context.Enlistment, this.context.FileSystem, this.context.Tracer);
+
+            Assert.AreEqual(HeadPathCount, result);
+            this.tracer.RelatedWarningEvents.Count.ShouldBeAtLeast(1);
+        }
+
+        #endregion
+
+        #region GetIndexFileCount error paths
+
+        [TestCase]
+        public void GetIndexFileCount_IndexTooSmall_ReturnsNegativeOne()
+        {
+            string indexPath = Path.Combine(this.gitParentPath, ".git", "index");
+            this.enlistmentDirectory.CreateFile(indexPath, "short", createDirectories: true);
+
+            int result = EnlistmentHydrationSummary.GetIndexFileCount(
+                this.context.Enlistment, this.context.FileSystem);
+
+            Assert.AreEqual(-1, result);
+        }
+
+        #endregion
+
+        #region CreateSummary cancellation
+
+        [TestCase]
+        public void CreateSummary_CancelledToken_ReturnsInvalidSummary()
+        {
+            // Set up a valid index file so CreateSummary gets past GetIndexFileCount
+            // before hitting the first cancellation check.
+            // Index header: 12+ bytes, with bytes 8-11 = big-endian file count.
+            string indexPath = Path.Combine(this.gitParentPath, ".git", "index");
+            byte[] indexBytes = new byte[12];
+            indexBytes[11] = 100; // file count = 100 (big-endian)
+            MockFile indexFile = new MockFile(indexPath, indexBytes);
+            MockDirectory gitDir = this.enlistmentDirectory.FindDirectory(Path.Combine(this.gitParentPath, ".git"));
+            gitDir.Files.Add(indexFile.FullName, indexFile);
+
+            CancellationTokenSource cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            EnlistmentHydrationSummary result = EnlistmentHydrationSummary.CreateSummary(
+                this.context.Enlistment, this.context.FileSystem, this.context.Tracer, cts.Token);
+
+            result.IsValid.ShouldBeFalse();
+            this.tracer.RelatedInfoEvents.Count.ShouldBeAtLeast(1);
+            // Cancellation should NOT log an error
+            Assert.AreEqual(0, this.tracer.RelatedErrorEvents.Count);
+        }
+
+        #endregion
+
+        #region HydrationStatus.Response TryParse error paths
+
+        [TestCase(null)]
+        [TestCase("")]
+        public void TryParse_NullOrEmpty_ReturnsFalse(string body)
+        {
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(body, out NamedPipeMessages.HydrationStatus.Response response);
+            Assert.IsFalse(result);
+            Assert.IsNull(response);
+        }
+
+        [TestCase("1,2,3")]
+        [TestCase("1,2,3,4,5")]
+        public void TryParse_TooFewParts_ReturnsFalse(string body)
+        {
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(body, out NamedPipeMessages.HydrationStatus.Response response);
+            Assert.IsFalse(result);
+            Assert.IsNull(response);
+        }
+
+        [TestCase("abc,2,3,4,5,6")]
+        [TestCase("1,2,three,4,5,6")]
+        [TestCase("1,2,3,4,5,six")]
+        public void TryParse_NonIntegerValues_ReturnsFalse(string body)
+        {
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(body, out NamedPipeMessages.HydrationStatus.Response response);
+            Assert.IsFalse(result);
+            Assert.IsNull(response);
+        }
+
+        [TestCase("-1,0,0,0,10,5")]
+        [TestCase("0,-1,0,0,10,5")]
+        [TestCase("0,0,-1,0,10,5")]
+        [TestCase("0,0,0,-1,10,5")]
+        public void TryParse_NegativeCounts_ReturnsFalse(string body)
+        {
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(body, out NamedPipeMessages.HydrationStatus.Response response);
+            Assert.IsFalse(result);
+        }
+
+        [TestCase("100,0,100,0,50,5")]
+        [TestCase("0,100,0,100,10,5")]
+        public void TryParse_HydratedExceedsTotal_ReturnsFalse(string body)
+        {
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(body, out NamedPipeMessages.HydrationStatus.Response response);
+            Assert.IsFalse(result);
+        }
+
+        [TestCase]
+        public void TryParse_ValidResponse_Succeeds()
+        {
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(
+                "10,5,3,2,100,50",
+                out NamedPipeMessages.HydrationStatus.Response response);
+
+            Assert.IsTrue(result);
+            Assert.AreEqual(10, response.PlaceholderFileCount);
+            Assert.AreEqual(5, response.PlaceholderFolderCount);
+            Assert.AreEqual(3, response.ModifiedFileCount);
+            Assert.AreEqual(2, response.ModifiedFolderCount);
+            Assert.AreEqual(100, response.TotalFileCount);
+            Assert.AreEqual(50, response.TotalFolderCount);
+            Assert.AreEqual(13, response.HydratedFileCount);
+            Assert.AreEqual(7, response.HydratedFolderCount);
+        }
+
+        [TestCase]
+        public void TryParse_ExtraFields_IgnoredAndSucceeds()
+        {
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(
+                "10,5,3,2,100,50,extra,fields",
+                out NamedPipeMessages.HydrationStatus.Response response);
+
+            Assert.IsTrue(result);
+            Assert.AreEqual(10, response.PlaceholderFileCount);
+            Assert.AreEqual(100, response.TotalFileCount);
+        }
+
+        [TestCase]
+        public void TryParse_ZeroCounts_IsValid()
+        {
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(
+                "0,0,0,0,0,0",
+                out NamedPipeMessages.HydrationStatus.Response response);
+
+            Assert.IsTrue(result);
+            Assert.IsTrue(response.IsValid);
+        }
+
+        [TestCase]
+        public void ToBody_RoundTrips_WithTryParse()
+        {
+            NamedPipeMessages.HydrationStatus.Response original = new NamedPipeMessages.HydrationStatus.Response
+            {
+                PlaceholderFileCount = 42,
+                PlaceholderFolderCount = 10,
+                ModifiedFileCount = 8,
+                ModifiedFolderCount = 3,
+                TotalFileCount = 1000,
+                TotalFolderCount = 200,
+            };
+
+            string body = original.ToBody();
+            bool result = NamedPipeMessages.HydrationStatus.Response.TryParse(body, out NamedPipeMessages.HydrationStatus.Response parsed);
+
+            Assert.IsTrue(result);
+            Assert.AreEqual(original.PlaceholderFileCount, parsed.PlaceholderFileCount);
+            Assert.AreEqual(original.PlaceholderFolderCount, parsed.PlaceholderFolderCount);
+            Assert.AreEqual(original.ModifiedFileCount, parsed.ModifiedFileCount);
+            Assert.AreEqual(original.ModifiedFolderCount, parsed.ModifiedFolderCount);
+            Assert.AreEqual(original.TotalFileCount, parsed.TotalFileCount);
+            Assert.AreEqual(original.TotalFolderCount, parsed.TotalFolderCount);
+        }
+
+        [TestCase]
+        public void ToDisplayMessage_InvalidResponse_ReturnsNull()
+        {
+            NamedPipeMessages.HydrationStatus.Response response = new NamedPipeMessages.HydrationStatus.Response
+            {
+                PlaceholderFileCount = -1,
+                TotalFileCount = 100,
+            };
+
+            Assert.IsNull(response.ToDisplayMessage());
+        }
+
+        [TestCase]
+        public void ToDisplayMessage_ValidResponse_FormatsCorrectly()
+        {
+            NamedPipeMessages.HydrationStatus.Response response = new NamedPipeMessages.HydrationStatus.Response
+            {
+                PlaceholderFileCount = 40,
+                PlaceholderFolderCount = 10,
+                ModifiedFileCount = 10,
+                ModifiedFolderCount = 5,
+                TotalFileCount = 100,
+                TotalFolderCount = 50,
+            };
+
+            string message = response.ToDisplayMessage();
+            Assert.IsNotNull(message);
+            Assert.That(message, Does.Contain("50%"));
+            Assert.That(message, Does.Contain("30%"));
+        }
+
+        #endregion
+    }
+}
