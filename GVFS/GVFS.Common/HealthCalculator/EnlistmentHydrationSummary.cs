@@ -5,6 +5,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 
 namespace GVFS.Common
 {
@@ -50,7 +51,8 @@ namespace GVFS.Common
         public static EnlistmentHydrationSummary CreateSummary(
             GVFSEnlistment enlistment,
             PhysicalFileSystem fileSystem,
-            ITracer tracer)
+            ITracer tracer,
+            CancellationToken cancellationToken = default)
         {
             Stopwatch totalStopwatch = Stopwatch.StartNew();
             Stopwatch phaseStopwatch = new Stopwatch();
@@ -63,6 +65,8 @@ namespace GVFS.Common
                 int totalFileCount = GetIndexFileCount(enlistment, fileSystem);
                 long indexReadMs = phaseStopwatch.ElapsedMilliseconds;
 
+                cancellationToken.ThrowIfCancellationRequested();
+
                 EnlistmentPathData pathData = new EnlistmentPathData();
 
                 /* FUTURE: These could be optimized to only deal with counts instead of full path lists */
@@ -70,9 +74,13 @@ namespace GVFS.Common
                 pathData.LoadPlaceholdersFromDatabase(enlistment);
                 long placeholderLoadMs = phaseStopwatch.ElapsedMilliseconds;
 
+                cancellationToken.ThrowIfCancellationRequested();
+
                 phaseStopwatch.Restart();
                 pathData.LoadModifiedPaths(enlistment, tracer);
                 long modifiedPathsLoadMs = phaseStopwatch.ElapsedMilliseconds;
+
+                cancellationToken.ThrowIfCancellationRequested();
 
                 int placeholderFileCount = pathData.PlaceholderFilePaths.Count;
                 int placeholderFolderCount = pathData.PlaceholderFolderPaths.Count;
@@ -107,6 +115,7 @@ namespace GVFS.Common
                 /* Getting all the directories is also slow, but not as slow as reading the entire index,
                  * GetTotalPathCount caches the count so this is only slow occasionally,
                  * and the GitStatusCache manager also calls this to ensure it is updated frequently. */
+                cancellationToken.ThrowIfCancellationRequested();
                 phaseStopwatch.Restart();
                 int totalFolderCount = GetHeadTreeCount(enlistment, fileSystem, tracer);
                 long treeCountMs = phaseStopwatch.ElapsedMilliseconds;
@@ -121,6 +130,19 @@ namespace GVFS.Common
                     ModifiedFolderCount = modifiedFolderCount,
                     TotalFileCount = totalFileCount,
                     TotalFolderCount = totalFolderCount,
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                tracer.RelatedInfo($"Hydration summary cancelled after {totalStopwatch.ElapsedMilliseconds}ms");
+                return new EnlistmentHydrationSummary()
+                {
+                    PlaceholderFileCount = -1,
+                    PlaceholderFolderCount = -1,
+                    ModifiedFileCount = -1,
+                    ModifiedFolderCount = -1,
+                    TotalFileCount = -1,
+                    TotalFolderCount = -1,
                 };
             }
             catch (Exception e)
