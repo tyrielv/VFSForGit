@@ -19,7 +19,6 @@ namespace GVFS.Hooks
         private const int InvalidProcessId = -1;
 
         private const int PostCommandSpinnerDelayMs = 500;
-        private const int HydrationStatusTimeoutMs = 3000;
 
         private static string enlistmentRoot;
         private static string enlistmentPipename;
@@ -97,9 +96,7 @@ namespace GVFS.Hooks
                         && ConfigurationAllowsHydrationStatus()
                         && !IsHydrationStatusCircuitBreakerTripped())
                     {
-                        /* Display a message about the hydration status of the repo.
-                         * Use a timeout to avoid blocking git status if the health check is slow. */
-                        ProcessHelper.Run("gvfs", "health --status", redirectOutput: false, timeoutMs: HydrationStatusTimeoutMs);
+                        TryDisplayCachedHydrationStatus();
                     }
                     break;
             }
@@ -134,6 +131,41 @@ namespace GVFS.Hooks
                 dotGVFSRoot,
                 NullTracer.Instance);
             return circuitBreaker.IsDisabled();
+        }
+
+        /// <summary>
+        /// Query the mount process for the cached hydration summary via named pipe.
+        /// Exits silently on any failure — this must never block git status.
+        /// </summary>
+        private static void TryDisplayCachedHydrationStatus()
+        {
+            try
+            {
+                using (NamedPipeClient pipeClient = new NamedPipeClient(enlistmentPipename))
+                {
+                    if (!pipeClient.Connect())
+                    {
+                        return;
+                    }
+
+                    pipeClient.SendRequest(new NamedPipeMessages.Message(NamedPipeMessages.HydrationStatus.Request, null));
+                    NamedPipeMessages.Message response = pipeClient.ReadResponse();
+
+                    if (response.Header == NamedPipeMessages.HydrationStatus.SuccessResult
+                        && NamedPipeMessages.HydrationStatus.Response.TryParse(response.Body, out NamedPipeMessages.HydrationStatus.Response status))
+                    {
+                        string message = status.ToDisplayMessage();
+                        if (message != null)
+                        {
+                            Console.WriteLine(message);
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Silently ignore — never block git status for hydration display
+            }
         }
 
         private static void ExitWithError(params string[] messages)
