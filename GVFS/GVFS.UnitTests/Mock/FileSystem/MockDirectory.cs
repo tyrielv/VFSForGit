@@ -170,6 +170,28 @@ namespace GVFS.UnitTests.Mock.FileSystem
             return newFile;
         }
 
+        public MockFile CreateFile(string path, byte[] contents, bool createDirectories = false)
+        {
+            string parentPath = path.Substring(0, path.LastIndexOf(Path.DirectorySeparatorChar));
+            MockDirectory parentDirectory = this.FindDirectory(parentPath);
+            if (createDirectories)
+            {
+                if (parentDirectory == null)
+                {
+                    parentDirectory = this.CreateDirectory(parentPath);
+                }
+            }
+            else
+            {
+                parentDirectory.ShouldNotBeNull();
+            }
+
+            MockFile newFile = new MockFile(path, contents);
+            parentDirectory.Files.Add(newFile.FullName, newFile);
+
+            return newFile;
+        }
+
         public MockDirectory CreateDirectory(string path)
         {
             int lastSlashIdx = path.LastIndexOf(Path.DirectorySeparatorChar);

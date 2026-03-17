@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 
 namespace GVFS.Hooks
 {
@@ -96,8 +97,7 @@ namespace GVFS.Hooks
                         && ConfigurationAllowsHydrationStatus()
                         && !IsHydrationStatusCircuitBreakerTripped())
                     {
-                        /* Display a message about the hydration status of the repo */
-                        ProcessHelper.Run("gvfs", "health --status", redirectOutput: false);
+                        TryDisplayCachedHydrationStatus();
                     }
                     break;
             }
@@ -127,9 +127,59 @@ namespace GVFS.Hooks
 
         private static bool IsHydrationStatusCircuitBreakerTripped()
         {
-            string gvfsRoot = Path.Combine(enlistmentRoot, ".gvfs");
-            HydrationStatusCircuitBreaker circuitBreaker = new HydrationStatusCircuitBreaker(gvfsRoot, NullTracer.Instance);
+            string dotGVFSRoot = Path.Combine(enlistmentRoot, ".gvfs");
+            HydrationStatusCircuitBreaker circuitBreaker = new HydrationStatusCircuitBreaker(
+                dotGVFSRoot,
+                NullTracer.Instance);
             return circuitBreaker.IsDisabled();
+        }
+
+        /// <summary>
+        /// Query the mount process for the cached hydration summary via named pipe.
+        /// The entire operation (connect + send + receive + parse) is bounded to
+        /// 100ms via Task.Wait. Exits silently on any failure — this must never block git status.
+        /// </summary>
+        private static void TryDisplayCachedHydrationStatus()
+        {
+            const int HydrationStatusTimeoutMs = 100;
+            const int ConnectTimeoutMs = 50;
+
+            try
+            {
+                Task<string> task = Task.Run(() =>
+                {
+                    using (NamedPipeClient pipeClient = new NamedPipeClient(enlistmentPipename))
+                    {
+                        if (!pipeClient.Connect(timeoutMilliseconds: ConnectTimeoutMs))
+                        {
+                            return null;
+                        }
+
+                        pipeClient.SendRequest(new NamedPipeMessages.Message(NamedPipeMessages.HydrationStatus.Request, null));
+                        NamedPipeMessages.Message response = pipeClient.ReadResponse();
+
+                        if (response.Header == NamedPipeMessages.HydrationStatus.SuccessResult
+                            && NamedPipeMessages.HydrationStatus.Response.TryParse(response.Body, out NamedPipeMessages.HydrationStatus.Response status))
+                        {
+                            return status.ToDisplayMessage();
+                        }
+
+                        return null;
+                    }
+                });
+
+                // Hard outer timeout — if the task hasn't completed (e.g., ReadResponse
+                // blocked on a stalled mount process), we abandon it. The orphaned thread
+                // is cleaned up when the hook process exits immediately after.
+                if (task.Wait(HydrationStatusTimeoutMs) && task.Result != null)
+                {
+                    Console.WriteLine(task.Result);
+                }
+            }
+            catch (Exception)
+            {
+                // Silently ignore — never block git status for hydration display
+            }
         }
 
         private static void ExitWithError(params string[] messages)

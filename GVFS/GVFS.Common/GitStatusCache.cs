@@ -50,6 +50,10 @@ namespace GVFS.Common
         private CancellationTokenSource shutdownTokenSource;
         private Task activeHydrationTask;
 
+        private volatile EnlistmentHydrationSummary cachedHydrationSummary;
+
+        private Func<int> projectedFolderCountProvider;
+
         private volatile CacheState cacheState = CacheState.Dirty;
 
         private object cacheFileLock = new object();
@@ -61,13 +65,14 @@ namespace GVFS.Common
         {
         }
 
-        public GitStatusCache(GVFSContext context, TimeSpan backoffTime)
+        public GitStatusCache(GVFSContext context, TimeSpan backoffTime, Func<int> projectedFolderCountProvider = null)
         {
             this.context = context;
             this.backoffTime = backoffTime;
             this.serializedGitStatusFilePath = this.context.Enlistment.GitStatusCachePath;
             this.statistics = new StatusStatistics();
             this.shutdownTokenSource = new CancellationTokenSource();
+            this.projectedFolderCountProvider = projectedFolderCountProvider;
 
             this.wakeUpThread = new AutoResetEvent(false);
         }
@@ -115,6 +120,15 @@ namespace GVFS.Common
         public void RefreshAndWait()
         {
             this.RebuildStatusCacheIfNeeded(ignoreBackoff: true);
+        }
+
+        /// <summary>
+        /// Returns the cached hydration summary if one has been computed,
+        /// or null if no valid summary is available yet.
+        /// </summary>
+        public EnlistmentHydrationSummary GetCachedHydrationSummary()
+        {
+            return this.cachedHydrationSummary;
         }
 
         /// <summary>
@@ -351,6 +365,7 @@ namespace GVFS.Common
                 bool rebuildStatusCacheSucceeded = this.TryRebuildStatusCache();
 
                 // Wait for hydration to complete before logging final stats.
+                // Exceptions are observed here to avoid unobserved task exceptions.
                 try
                 {
                     hydrationTask.Wait();
@@ -409,11 +424,13 @@ namespace GVFS.Common
                  * and this is also a convenient place to log telemetry for it.
                  */
                 EnlistmentHydrationSummary hydrationSummary =
-                    EnlistmentHydrationSummary.CreateSummary(this.context.Enlistment, this.context.FileSystem, this.context.Tracer, this.shutdownTokenSource.Token);
+                    EnlistmentHydrationSummary.CreateSummary(this.context.Enlistment, this.context.FileSystem, this.context.Tracer, this.shutdownTokenSource.Token, this.projectedFolderCountProvider);
                 EventMetadata metadata = new EventMetadata();
                 metadata.Add("Area", EtwArea);
                 if (hydrationSummary.IsValid)
                 {
+                    this.cachedHydrationSummary = hydrationSummary;
+
                     metadata[nameof(hydrationSummary.TotalFolderCount)] = hydrationSummary.TotalFolderCount;
                     metadata[nameof(hydrationSummary.TotalFileCount)] = hydrationSummary.TotalFileCount;
                     metadata[nameof(hydrationSummary.HydratedFolderCount)] = hydrationSummary.HydratedFolderCount;
@@ -443,6 +460,7 @@ namespace GVFS.Common
             }
             catch (Exception ex)
             {
+                circuitBreaker.RecordFailure();
                 EventMetadata metadata = new EventMetadata();
                 metadata.Add("Area", EtwArea);
                 metadata.Add("Exception", ex.ToString());

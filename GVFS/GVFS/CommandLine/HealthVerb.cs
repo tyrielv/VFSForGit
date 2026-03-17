@@ -1,9 +1,11 @@
 ﻿using CommandLine;
 using GVFS.Common;
 using GVFS.Common.FileSystem;
+using GVFS.Common.NamedPipes;
 using GVFS.Common.Tracing;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace GVFS.CommandLine
@@ -88,8 +90,53 @@ namespace GVFS.CommandLine
 
         private void OutputHydrationPercent(GVFSEnlistment enlistment, ITracer tracer)
         {
-            EnlistmentHydrationSummary summary = EnlistmentHydrationSummary.CreateSummary(enlistment, this.FileSystem, tracer);
+            // Try cached summary from mount process first (fast path)
+            string cachedMessage = this.TryGetCachedHydrationMessage(enlistment);
+            if (cachedMessage != null)
+            {
+                this.Output.WriteLine(cachedMessage);
+                return;
+            }
+
+            // Fall back to in-proc computation with index-based folder count
+            Func<int> folderCountProvider = () =>
+                GVFS.Virtualization.Projection.GitIndexProjection.CountIndexFolders(tracer, enlistment.GitIndexPath);
+            EnlistmentHydrationSummary summary = EnlistmentHydrationSummary.CreateSummary(
+                enlistment, this.FileSystem, tracer, projectedFolderCountProvider: folderCountProvider);
             this.Output.WriteLine(summary.ToMessage());
+        }
+
+        /// <summary>
+        /// Try to get the cached hydration summary from the mount process via named pipe.
+        /// Returns null if unavailable (GVFS not mounted, no cached value, parse error, etc.).
+        /// </summary>
+        private string TryGetCachedHydrationMessage(GVFSEnlistment enlistment)
+        {
+            try
+            {
+                using (NamedPipeClient pipeClient = new NamedPipeClient(enlistment.NamedPipeName))
+                {
+                    if (!pipeClient.Connect())
+                    {
+                        return null;
+                    }
+
+                    pipeClient.SendRequest(new NamedPipeMessages.Message(NamedPipeMessages.HydrationStatus.Request, null));
+                    NamedPipeMessages.Message response = pipeClient.ReadResponse();
+
+                    if (response.Header != NamedPipeMessages.HydrationStatus.SuccessResult
+                        || !NamedPipeMessages.HydrationStatus.Response.TryParse(response.Body, out NamedPipeMessages.HydrationStatus.Response status))
+                    {
+                        return null;
+                    }
+
+                    return status.ToDisplayMessage();
+                }
+            }
+            catch (Exception)
+            {
+                return null;
+            }
         }
 
         private void PrintOutput(EnlistmentHealthData enlistmentHealthData)
