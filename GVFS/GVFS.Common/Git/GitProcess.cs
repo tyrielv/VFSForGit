@@ -98,6 +98,12 @@ namespace GVFS.Common.Git
 
         public bool LowerPriority { get; set; }
 
+        /// <summary>
+        /// Additional environment variables to set on child git processes,
+        /// typically populated via ITracer.GetChildProcessEnvironment().
+        /// </summary>
+        public Dictionary<string, string> AdditionalEnvironmentVariables { get; set; }
+
         public static Result Init(Enlistment enlistment)
         {
             return new GitProcess(enlistment).InvokeGitOutsideEnlistment("init \"" + enlistment.WorkingDirectoryBackingRoot + "\"");
@@ -861,6 +867,14 @@ namespace GVFS.Common.Git
 
             processInfo.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0";
             processInfo.EnvironmentVariables["GCM_VALIDATE"] = "0";
+
+            if (this.AdditionalEnvironmentVariables != null)
+            {
+                foreach (var kvp in this.AdditionalEnvironmentVariables)
+                {
+                    processInfo.EnvironmentVariables[kvp.Key] = kvp.Value;
+                }
+            }
 
             if (gitObjectsDirectory != null)
             {

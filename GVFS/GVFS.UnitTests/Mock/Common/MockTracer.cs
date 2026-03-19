@@ -136,6 +136,11 @@ namespace GVFS.UnitTests.Mock.Common
         {
         }
 
+        public Dictionary<string, string> GetChildProcessEnvironment()
+        {
+            return null;
+        }
+
         public void Dispose()
         {
             this.Dispose(true);

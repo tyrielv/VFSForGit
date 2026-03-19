@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -90,6 +91,11 @@ namespace GVFS.Common.Tracing
         void ITracer.SetGitCommandSessionId(string sessionId)
         {
 
+        }
+
+        Dictionary<string, string> ITracer.GetChildProcessEnvironment()
+        {
+            return null;
         }
 
         ITracer ITracer. StartActivity(string activityName, EventLevel level)

@@ -111,6 +111,36 @@ namespace GVFS.Common.Tracing
             }
         }
 
+        public Dictionary<string, string> GetChildProcessEnvironment()
+        {
+            Dictionary<string, string> result = null;
+            foreach (EventListener listener in this.listeners)
+            {
+                var envVars = listener.GetChildProcessEnvironment();
+                if (envVars != null)
+                {
+                    if (result == null)
+                    {
+                        result = new Dictionary<string, string>();
+                    }
+
+                    foreach (var kvp in envVars)
+                    {
+                        if (result.ContainsKey(kvp.Key))
+                        {
+                            this.RelatedWarning(
+                                $"Multiple listeners set environment variable '{kvp.Key}' for child process. " +
+                                $"Listener {listener.GetType().Name} is overwriting the previous value.");
+                        }
+
+                        result[kvp.Key] = kvp.Value;
+                    }
+                }
+            }
+
+            return result;
+        }
+
         public void AddEventListener(EventListener listener)
         {
             if (this.isDisposed)

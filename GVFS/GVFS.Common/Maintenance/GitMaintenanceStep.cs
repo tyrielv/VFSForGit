@@ -186,6 +186,9 @@ namespace GVFS.Common.Maintenance
                     throw new StoppingException();
                 }
 
+                this.MaintenanceGitProcess.AdditionalEnvironmentVariables =
+                    this.Context.Tracer.GetChildProcessEnvironment();
+
                 GitProcess.Result result = work.Invoke(this.MaintenanceGitProcess);
 
                 if (this.Stopping)

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using GVFS.Common.Git;
 
@@ -51,6 +52,30 @@ namespace GVFS.Common.Tracing
         {
             get { return this.gitCommandSessionId; }
             set { this.gitCommandSessionId = value; }
+        }
+
+        /// <summary>
+        /// Returns the SID of the active Trace2 session on the current thread,
+        /// or null if no session is active. Used to set GIT_TRACE2_PARENT_SID
+        /// on child git processes for parent-child trace correlation.
+        /// </summary>
+        public string GetActiveSessionSid()
+        {
+            return this.activeSession.Value?.Sid;
+        }
+
+        public override Dictionary<string, string> GetChildProcessEnvironment()
+        {
+            string sid = this.GetActiveSessionSid();
+            if (sid != null)
+            {
+                return new Dictionary<string, string>
+                {
+                    ["GIT_TRACE2_PARENT_SID"] = sid
+                };
+            }
+
+            return null;
         }
 
         public static Trace2PipeEventListener CreateIfEnabled(

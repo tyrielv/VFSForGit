@@ -35,6 +35,15 @@ namespace GVFS.Common.Tracing
             }
         }
 
+        /// <summary>
+        /// Allows this listener to contribute environment variables to a
+        /// child process before it is started. Returns null if none needed.
+        /// </summary>
+        public virtual System.Collections.Generic.Dictionary<string, string> GetChildProcessEnvironment()
+        {
+            return null;
+        }
+
         protected abstract void RecordMessageInternal(TraceEventMessage message);
 
         protected string GetLogString(string eventName, EventOpcode opcode, string jsonPayload)

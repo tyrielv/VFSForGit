@@ -120,6 +120,8 @@ namespace GVFS.Mount
 
         private void MountWithLockAcquired(EventLevel verbosity, Keywords keywords)
         {
+            using (ITracer mountActivity = this.tracer.StartActivity("MountInit", EventLevel.Informational, Keywords.Telemetry, metadata: null))
+            {
             // Start auth + config query immediately — these are network-bound and don't
             // depend on repo metadata or cache paths. Every millisecond of network latency
             // we can overlap with local I/O is a win.
@@ -296,6 +298,7 @@ namespace GVFS.Mount
                     Keywords.Telemetry);
 
                 this.currentState = MountState.Ready;
+                } // end MountInit activity — Trace2 session closes here
 
                 this.unmountEvent.WaitOne();
             }
@@ -1047,7 +1050,12 @@ namespace GVFS.Mount
                     this.currentState = MountState.Unmounting;
 
                     connection.TrySendResponse(NamedPipeMessages.Unmount.Acknowledged);
-                    this.UnmountAndStopWorkingDirectoryCallbacks();
+
+                    using (ITracer unmountActivity = this.tracer.StartActivity("Unmount", EventLevel.Informational, Keywords.Telemetry, metadata: null))
+                    {
+                        this.UnmountAndStopWorkingDirectoryCallbacks();
+                    }
+
                     connection.TrySendResponse(NamedPipeMessages.Unmount.Completed);
 
                     this.unmountEvent.Set();
