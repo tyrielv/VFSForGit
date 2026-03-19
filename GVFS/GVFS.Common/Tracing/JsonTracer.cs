@@ -393,7 +393,9 @@ namespace GVFS.Common.Tracing
                 Level = level,
                 Keywords = keywords,
                 Opcode = opcode,
-                Payload = jsonPayload
+                Payload = jsonPayload,
+                TimestampUtc = DateTime.UtcNow,
+                ThreadName = Thread.CurrentThread.Name ?? "main"
             };
 
             // Iterating over the bag is thread-safe as the enumerator returned here

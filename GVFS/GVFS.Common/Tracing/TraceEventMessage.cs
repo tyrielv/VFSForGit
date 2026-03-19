@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Threading;
 
 namespace GVFS.Common.Tracing
 {
@@ -11,5 +12,7 @@ namespace GVFS.Common.Tracing
         public Keywords Keywords { get; set; }
         public EventOpcode Opcode { get; set; }
         public string Payload { get; set; }
+        public DateTime TimestampUtc { get; set; }
+        public string ThreadName { get; set; }
     }
 }
