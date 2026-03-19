@@ -1,28 +1,25 @@
 using System;
+using System.Threading;
 using GVFS.Common.Git;
 
 namespace GVFS.Common.Tracing
 {
     /// <summary>
-    /// Manages Trace2 telemetry to a named pipe consumed by the trace2receiver
-    /// OTEL collector. Unlike TelemetryDaemonEventListener (which maintains a
-    /// single long-lived pipe connection), this creates discrete per-operation
-    /// sessions, each with its own pipe connection and Trace2 event stream.
+    /// EventListener that routes TraceEventMessages to Trace2 sessions on
+    /// a named pipe consumed by trace2receiver (OTEL collector).
     ///
-    /// This is necessary because trace2receiver maps one pipe connection to
-    /// one OTEL trace and only exports data when the connection closes. A
-    /// long-running process like gvfs mount would cause unbounded memory
-    /// growth and zero telemetry until exit.
+    /// Sessions are automatically opened when the first StartActivity event
+    /// arrives on a thread with no active session, and closed when the
+    /// matching Stop event brings the nesting depth back to zero. This means
+    /// existing StartActivity/Stop patterns in maintenance steps, heartbeat,
+    /// etc. naturally create discrete OTEL traces without any special calls.
     ///
-    /// Usage:
-    ///   using (var session = listener.BeginSession("gvfs:prefetch", "prefetch"))
-    ///   {
-    ///       session.RegionEnter("prefetch", "download-packs");
-    ///       // ... do work ...
-    ///       session.RegionLeave("prefetch", "download-packs", elapsed);
-    ///   }
+    /// Events on threads with no active session (e.g., the mount root
+    /// tracer's long-lived activity) are silently dropped. Only activities
+    /// created via StartActivity (ParentActivityId != Guid.Empty) trigger
+    /// session creation.
     /// </summary>
-    public class Trace2PipeEventListener : IDisposable
+    public class Trace2PipeEventListener : EventListener
     {
         private readonly string pipeName;
         private readonly string enlistmentId;
@@ -30,13 +27,18 @@ namespace GVFS.Common.Tracing
         private readonly string worktree;
         private readonly Trace2SidGenerator sidGenerator;
 
+        private readonly AsyncLocal<Trace2Session> activeSession = new AsyncLocal<Trace2Session>();
+        private readonly AsyncLocal<int> nestingDepth = new AsyncLocal<int>();
+
         private string gitCommandSessionId;
 
         private Trace2PipeEventListener(
             string pipeName,
             string enlistmentId,
             string mountId,
-            string worktree)
+            string worktree,
+            IEventListenerEventSink eventSink)
+            : base(EventLevel.Verbose, Keywords.Any, eventSink)
         {
             this.pipeName = pipeName;
             this.enlistmentId = enlistmentId;
@@ -45,27 +47,18 @@ namespace GVFS.Common.Tracing
             this.sidGenerator = new Trace2SidGenerator();
         }
 
-        /// <summary>
-        /// Gets or sets the Trace2 SID of the currently active git command.
-        /// When set, new sessions created during this window will use it as
-        /// a parent SID, creating a hierarchical OTEL trace that links the
-        /// git command and VFS operation together.
-        /// </summary>
         public string GitCommandSessionId
         {
             get { return this.gitCommandSessionId; }
             set { this.gitCommandSessionId = value; }
         }
 
-        /// <summary>
-        /// Create a Trace2PipeEventListener if the gvfs.trace2-pipe config
-        /// setting is present. Returns null if not configured.
-        /// </summary>
         public static Trace2PipeEventListener CreateIfEnabled(
             string gitBinRoot,
             string enlistmentId,
             string mountId,
-            string worktree)
+            string worktree,
+            IEventListenerEventSink eventSink)
         {
             string pipeName = GetConfigValue(gitBinRoot, GVFSConstants.GitConfig.GVFSTrace2Pipe);
             if (string.IsNullOrEmpty(pipeName))
@@ -73,37 +66,145 @@ namespace GVFS.Common.Tracing
                 return null;
             }
 
-            return new Trace2PipeEventListener(pipeName, enlistmentId, mountId, worktree);
+            return new Trace2PipeEventListener(pipeName, enlistmentId, mountId, worktree, eventSink);
         }
 
-        /// <summary>
-        /// Begin a new discrete Trace2 session. Opens a pipe connection and
-        /// sends the session preamble. Returns null if the pipe is unavailable.
-        ///
-        /// If a git command is currently active (GitCommandSessionId is set),
-        /// the session will use it as a parent SID, creating a parent-child
-        /// span relationship in the same OTEL trace.
-        /// </summary>
-        public Trace2Session BeginSession(string cmdName, string cmdMode = null, string[] argv = null)
+        protected override void RecordMessageInternal(TraceEventMessage message)
         {
-            string parentSid = string.IsNullOrEmpty(this.gitCommandSessionId)
-                ? null
-                : this.gitCommandSessionId;
+            switch (message.Opcode)
+            {
+                case EventOpcode.Start:
+                    this.HandleStart(message);
+                    break;
 
-            return Trace2Session.Begin(
-                this.pipeName,
-                this.sidGenerator,
-                cmdName,
-                cmdMode,
-                argv ?? new[] { "gvfs", cmdName },
-                this.mountId,
-                this.enlistmentId,
-                this.worktree,
-                parentSid);
+                case EventOpcode.Stop:
+                    this.HandleStop(message);
+                    break;
+
+                default:
+                    this.HandleInfo(message);
+                    break;
+            }
         }
 
-        public void Dispose()
+        private void HandleStart(TraceEventMessage message)
         {
+            Trace2Session session = this.activeSession.Value;
+
+            if (session == null)
+            {
+                // Only auto-open for child activities (from StartActivity),
+                // not the root tracer's long-lived activity.
+                if (message.ParentActivityId == Guid.Empty)
+                {
+                    return;
+                }
+
+                string parentSid = string.IsNullOrEmpty(this.gitCommandSessionId)
+                    ? null
+                    : this.gitCommandSessionId;
+
+                session = Trace2Session.Begin(
+                    this.pipeName,
+                    this.sidGenerator,
+                    "gvfs:" + message.EventName,
+                    cmdMode: null,
+                    argv: new[] { "gvfs", message.EventName },
+                    this.mountId,
+                    this.enlistmentId,
+                    this.worktree,
+                    parentSid);
+
+                if (session == null)
+                {
+                    return;
+                }
+
+                this.activeSession.Value = session;
+                this.nestingDepth.Value = 0;
+            }
+
+            this.nestingDepth.Value++;
+            session.RegionEnter(message.EventName, message.EventName);
+        }
+
+        private void HandleStop(TraceEventMessage message)
+        {
+            Trace2Session session = this.activeSession.Value;
+            if (session == null)
+            {
+                return;
+            }
+
+            double durationSec = 0;
+            if (message.Payload != null)
+            {
+                try
+                {
+                    var metadata = Newtonsoft.Json.JsonConvert.DeserializeObject<EventMetadata>(message.Payload);
+                    if (metadata != null && metadata.ContainsKey("DurationMs"))
+                    {
+                        durationSec = Convert.ToDouble(metadata["DurationMs"]) / 1000.0;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            session.RegionLeave(message.EventName, message.EventName, durationSec);
+
+            this.nestingDepth.Value--;
+            if (this.nestingDepth.Value <= 0)
+            {
+                this.activeSession.Value = null;
+                this.nestingDepth.Value = 0;
+                session.Dispose();
+            }
+        }
+
+        private void HandleInfo(TraceEventMessage message)
+        {
+            Trace2Session session = this.activeSession.Value;
+            if (session == null)
+            {
+                return;
+            }
+
+            if (message.Level <= EventLevel.Error)
+            {
+                string errorMsg = ExtractMessage(message.Payload, TracingConstants.MessageKey.ErrorMessage);
+                if (errorMsg != null)
+                {
+                    session.WriteErrorEvent(errorMsg);
+                }
+            }
+            else if (message.Payload != null)
+            {
+                session.WriteDataEvent(message.EventName, "payload", message.Payload);
+            }
+        }
+
+        private static string ExtractMessage(string jsonPayload, string key)
+        {
+            if (string.IsNullOrEmpty(jsonPayload))
+            {
+                return null;
+            }
+
+            try
+            {
+                var dict = Newtonsoft.Json.JsonConvert.DeserializeObject<System.Collections.Generic.Dictionary<string, object>>(jsonPayload);
+                if (dict != null && dict.TryGetValue(key, out object value) && value != null)
+                {
+                    return value.ToString();
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
         }
 
         private static string GetConfigValue(string gitBinRoot, string configKey)

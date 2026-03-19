@@ -22,7 +22,6 @@ namespace GVFS.Common.Tracing
         private readonly EventLevel startStopLevel;
         private readonly Keywords startStopKeywords;
 
-        private Trace2PipeEventListener trace2Listener;
         private bool isDisposed = false;
         private bool stopped = false;
 
@@ -62,7 +61,11 @@ namespace GVFS.Common.Tracing
                 }
 
                 // TODO: Pass worktree path once worktree support PR is merged
-                this.trace2Listener = Trace2PipeEventListener.CreateIfEnabled(gitBinRoot, enlistmentId, mountId, worktree: null);
+                Trace2PipeEventListener trace2Listener = Trace2PipeEventListener.CreateIfEnabled(gitBinRoot, enlistmentId, mountId, worktree: null, this);
+                if (trace2Listener != null)
+                {
+                    this.listeners.Add(trace2Listener);
+                }
             }
         }
 
@@ -101,13 +104,12 @@ namespace GVFS.Common.Tracing
                 daemonListener.GitCommandSessionId = sessionId;
             }
 
-            if (this.trace2Listener != null)
+            Trace2PipeEventListener trace2Listener = this.listeners.FirstOrDefault(x => x is Trace2PipeEventListener) as Trace2PipeEventListener;
+            if (trace2Listener != null)
             {
-                this.trace2Listener.GitCommandSessionId = sessionId;
+                trace2Listener.GitCommandSessionId = sessionId;
             }
         }
-
-        public Trace2PipeEventListener Trace2Listener => this.trace2Listener;
 
         public void AddEventListener(EventListener listener)
         {
@@ -159,12 +161,6 @@ namespace GVFS.Common.Tracing
                 while (this.listeners.TryTake(out listener))
                 {
                     listener.Dispose();
-                }
-
-                if (this.trace2Listener != null)
-                {
-                    this.trace2Listener.Dispose();
-                    this.trace2Listener = null;
                 }
             }
 

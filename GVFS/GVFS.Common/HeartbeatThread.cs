@@ -57,7 +57,11 @@ namespace GVFS.Common
                 metadata.Add("MinutesUptime", (long)(now - this.startTime).TotalMinutes);
                 metadata.Add("MinutesSinceLast", (int)(now - this.lastHeartBeatTime).TotalMinutes);
                 this.lastHeartBeatTime = now;
-                this.tracer.RelatedEvent(eventLevel, "Heartbeat", metadata, Keywords.Telemetry);
+
+                using (ITracer activity = this.tracer.StartActivity("Heartbeat", eventLevel, Keywords.Telemetry, metadata))
+                {
+                    activity.Stop(metadata);
+                }
             }
             catch (Exception e)
             {

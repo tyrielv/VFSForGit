@@ -74,50 +74,47 @@ namespace GVFS.Common.Maintenance
 
         protected override void PerformMaintenance()
         {
-            long last;
-            string error = null;
-
-            if (!this.TryGetMaxGoodPrefetchTimestamp(out last, out error))
+            using (ITracer activity = this.Context.Tracer.StartActivity(this.Area, EventLevel.Informational, Keywords.Telemetry, metadata: null))
             {
-                this.Context.Tracer.RelatedError(error);
-                return;
-            }
+                long last;
+                string error = null;
 
-            if (last == NoExistingPrefetchPacks)
-            {
-                /* If there are no existing prefetch packs, that means that either the
-                 * first prefetch is still in progress or the clone was run with "--no-prefetch".
-                 * In either case, we should not run prefetch as a maintenance task.
-                 * If users want to prefetch after cloning with "--no-prefetch", they can run
-                 * "gvfs prefetch" manually. Also, "git pull" and "git fetch" will run prefetch
-                 * as a pre-command hook. */
-                this.Context.Tracer.RelatedInfo(this.Area + ": Skipping prefetch since there are no existing prefetch packs");
-                return;
-            }
-
-            DateTime lastDateTime = EpochConverter.FromUnixEpochSeconds(last);
-            DateTime now = DateTime.UtcNow;
-
-            if (now <= lastDateTime + this.timeBetweenPrefetches)
-            {
-                this.Context.Tracer.RelatedInfo(this.Area + ": Skipping prefetch since most-recent prefetch ({0}) is too close to now ({1})", lastDateTime, now);
-                return;
-            }
-
-            this.RunGitCommand(
-                process =>
+                if (!this.TryGetMaxGoodPrefetchTimestamp(out last, out error))
                 {
-                    this.TryPrefetchCommitsAndTrees(out error, process);
-                    return null;
-                },
-                nameof(this.TryPrefetchCommitsAndTrees));
+                    activity.RelatedError(error);
+                    return;
+                }
 
-            if (!string.IsNullOrEmpty(error))
-            {
-                this.Context.Tracer.RelatedWarning(
-                    metadata: this.CreateEventMetadata(),
-                    message: $"{nameof(this.TryPrefetchCommitsAndTrees)} failed with error '{error}'",
-                    keywords: Keywords.Telemetry);
+                if (last == NoExistingPrefetchPacks)
+                {
+                    activity.RelatedInfo(this.Area + ": Skipping prefetch since there are no existing prefetch packs");
+                    return;
+                }
+
+                DateTime lastDateTime = EpochConverter.FromUnixEpochSeconds(last);
+                DateTime now = DateTime.UtcNow;
+
+                if (now <= lastDateTime + this.timeBetweenPrefetches)
+                {
+                    activity.RelatedInfo(this.Area + ": Skipping prefetch since most-recent prefetch ({0}) is too close to now ({1})", lastDateTime, now);
+                    return;
+                }
+
+                this.RunGitCommand(
+                    process =>
+                    {
+                        this.TryPrefetchCommitsAndTrees(out error, process);
+                        return null;
+                    },
+                    nameof(this.TryPrefetchCommitsAndTrees));
+
+                if (!string.IsNullOrEmpty(error))
+                {
+                    activity.RelatedWarning(
+                        metadata: this.CreateEventMetadata(),
+                        message: $"{nameof(this.TryPrefetchCommitsAndTrees)} failed with error '{error}'",
+                        keywords: Keywords.Telemetry);
+                }
             }
         }
 
