@@ -46,7 +46,9 @@ namespace GVFS.Common.Tracing
                 ticks = DateTime.UtcNow.Ticks;
                 if (ticks <= this.lastTimestampTicks)
                 {
-                    ticks = this.lastTimestampTicks + 1;
+                    // Advance by 10 ticks (1 microsecond) to guarantee
+                    // a different value in the 6-digit microsecond field.
+                    ticks = this.lastTimestampTicks + 10;
                 }
 
                 this.lastTimestampTicks = ticks;
