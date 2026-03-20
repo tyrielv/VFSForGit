@@ -120,8 +120,6 @@ namespace GVFS.Mount
 
         private void MountWithLockAcquired(EventLevel verbosity, Keywords keywords)
         {
-            using (ITracer mountActivity = this.tracer.StartActivity("MountInit", EventLevel.Informational, Keywords.Telemetry, metadata: null))
-            {
             // Start auth + config query immediately — these are network-bound and don't
             // depend on repo metadata or cache paths. Every millisecond of network latency
             // we can overlap with local I/O is a win.
@@ -250,6 +248,18 @@ namespace GVFS.Mount
 
             using (NamedPipeServer pipeServer = this.StartNamedPipe())
             {
+                using (ITracer mountActivity = this.tracer.StartActivity(
+                    "MountInit",
+                    EventLevel.Informational,
+                    Keywords.Telemetry,
+                    new EventMetadata
+                    {
+                        { "Version", ProcessHelper.GetCurrentProcessVersion() },
+                        { "EnlistmentRoot", this.enlistment.EnlistmentRoot },
+                        { "Remote", this.enlistment.RepoUrl != null ? Uri.EscapeUriString(this.enlistment.RepoUrl) : null },
+                        { "ObjectsEndpoint", this.cacheServer?.Url != null ? Uri.EscapeUriString(this.cacheServer.Url) : null },
+                    }))
+                {
                 this.tracer.RelatedEvent(
                     EventLevel.Informational,
                     $"{nameof(this.Mount)}_StartedNamedPipe",
@@ -298,10 +308,10 @@ namespace GVFS.Mount
                     Keywords.Telemetry);
 
                 this.currentState = MountState.Ready;
-                } // end MountInit activity — Trace2 session closes here
+                } // end MountInit activity
 
                 this.unmountEvent.WaitOne();
-            }
+            } // end NamedPipeServer using
         }
 
         private GVFSContext CreateContext()

@@ -114,17 +114,6 @@ namespace GVFS.Mount
 
             CacheServerInfo cacheServer = CacheServerResolver.GetCacheServerFromConfig(enlistment);
 
-            tracer.WriteStartEvent(
-                enlistment.WorkingDirectoryRoot,
-                enlistment.RepoUrl,
-                cacheServer.Url,
-                new EventMetadata
-                {
-                    { "IsElevated", GVFSPlatform.Instance.IsElevated() },
-                    { nameof(this.EnlistmentRootPathParameter), this.EnlistmentRootPathParameter },
-                    { nameof(this.StartedByService), this.StartedByService },
-                    { nameof(this.StartedByVerb), this.StartedByVerb },
-                });
 
             AppDomain.CurrentDomain.UnhandledException += (object sender, UnhandledExceptionEventArgs e) =>
             {
@@ -159,12 +148,15 @@ namespace GVFS.Mount
 
         private void UnhandledGVFSExceptionHandler(ITracer tracer, object sender, UnhandledExceptionEventArgs e)
         {
-            Exception exception = e.ExceptionObject as Exception;
+            using (ITracer activity = tracer.StartActivity("UnhandledException", EventLevel.Critical, Keywords.Telemetry, metadata: null))
+            {
+                Exception exception = e.ExceptionObject as Exception;
 
-            EventMetadata metadata = new EventMetadata();
-            metadata.Add("Exception", exception.ToString());
-            metadata.Add("IsTerminating", e.IsTerminating);
-            tracer.RelatedError(metadata, "UnhandledGVFSExceptionHandler caught unhandled exception");
+                EventMetadata metadata = new EventMetadata();
+                metadata.Add("Exception", exception.ToString());
+                metadata.Add("IsTerminating", e.IsTerminating);
+                activity.RelatedError(metadata, "UnhandledGVFSExceptionHandler caught unhandled exception");
+            }
         }
 
         private JsonTracer CreateTracer(GVFSEnlistment enlistment, EventLevel verbosity, Keywords keywords)

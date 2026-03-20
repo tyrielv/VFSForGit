@@ -118,13 +118,6 @@ namespace GVFS.Common.Tracing
 
             if (session == null)
             {
-                // Only auto-open for child activities (from StartActivity),
-                // not the root tracer's long-lived activity.
-                if (message.ParentActivityId == Guid.Empty)
-                {
-                    return;
-                }
-
                 string parentSid = string.IsNullOrEmpty(this.gitCommandSessionId)
                     ? null
                     : this.gitCommandSessionId;
