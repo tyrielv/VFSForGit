@@ -477,60 +477,67 @@ namespace GVFS.Mount
         {
             NamedPipeMessages.Message message = NamedPipeMessages.Message.FromString(request);
 
-            switch (message.Header)
+            using (ITracer activity = this.tracer.StartActivity(
+                "HandleRequest",
+                EventLevel.Verbose,
+                Keywords.Telemetry,
+                new EventMetadata { { "messageType", message.Header } }))
             {
-                case NamedPipeMessages.GetStatus.Request:
-                    this.HandleGetStatusRequest(connection);
-                    break;
+                switch (message.Header)
+                {
+                    case NamedPipeMessages.GetStatus.Request:
+                        this.HandleGetStatusRequest(connection);
+                        break;
 
-                case NamedPipeMessages.Unmount.Request:
-                    this.HandleUnmountRequest(connection);
-                    break;
+                    case NamedPipeMessages.Unmount.Request:
+                        this.HandleUnmountRequest(connection);
+                        break;
 
-                case NamedPipeMessages.AcquireLock.AcquireRequest:
-                    this.HandleLockRequest(message.Body, connection);
-                    break;
+                    case NamedPipeMessages.AcquireLock.AcquireRequest:
+                        this.HandleLockRequest(message.Body, connection);
+                        break;
 
-                case NamedPipeMessages.ReleaseLock.Request:
-                    this.HandleReleaseLockRequest(message.Body, connection);
-                    break;
+                    case NamedPipeMessages.ReleaseLock.Request:
+                        this.HandleReleaseLockRequest(message.Body, connection);
+                        break;
 
-                case NamedPipeMessages.DownloadObject.DownloadRequest:
-                    this.HandleDownloadObjectRequest(message, connection);
-                    break;
+                    case NamedPipeMessages.DownloadObject.DownloadRequest:
+                        this.HandleDownloadObjectRequest(message, connection);
+                        break;
 
-                case NamedPipeMessages.ModifiedPaths.ListRequest:
-                    this.HandleModifiedPathsListRequest(message, connection);
-                    break;
+                    case NamedPipeMessages.ModifiedPaths.ListRequest:
+                        this.HandleModifiedPathsListRequest(message, connection);
+                        break;
 
-                case NamedPipeMessages.PostIndexChanged.NotificationRequest:
-                    this.HandlePostIndexChangedRequest(message, connection);
-                    break;
+                    case NamedPipeMessages.PostIndexChanged.NotificationRequest:
+                        this.HandlePostIndexChangedRequest(message, connection);
+                        break;
 
-                case NamedPipeMessages.PrepareForUnstage.Request:
-                    this.HandlePrepareForUnstageRequest(message, connection);
-                    break;
+                    case NamedPipeMessages.PrepareForUnstage.Request:
+                        this.HandlePrepareForUnstageRequest(message, connection);
+                        break;
 
-                case NamedPipeMessages.RunPostFetchJob.PostFetchJob:
-                    this.HandlePostFetchJobRequest(message, connection);
-                    break;
+                    case NamedPipeMessages.RunPostFetchJob.PostFetchJob:
+                        this.HandlePostFetchJobRequest(message, connection);
+                        break;
 
-                case NamedPipeMessages.DehydrateFolders.Dehydrate:
-                    this.HandleDehydrateFolders(message, connection);
-                    break;
+                    case NamedPipeMessages.DehydrateFolders.Dehydrate:
+                        this.HandleDehydrateFolders(message, connection);
+                        break;
 
-                case NamedPipeMessages.HydrationStatus.Request:
-                    this.HandleGetHydrationStatusRequest(connection);
-                    break;
+                    case NamedPipeMessages.HydrationStatus.Request:
+                        this.HandleGetHydrationStatusRequest(connection);
+                        break;
 
-                default:
-                    EventMetadata metadata = new EventMetadata();
-                    metadata.Add("Area", "Mount");
-                    metadata.Add("Header", message.Header);
-                    this.tracer.RelatedError(metadata, "HandleRequest: Unknown request");
+                    default:
+                        EventMetadata metadata = new EventMetadata();
+                        metadata.Add("Area", "Mount");
+                        metadata.Add("Header", message.Header);
+                        activity.RelatedError(metadata, "HandleRequest: Unknown request");
 
-                    connection.TrySendResponse(NamedPipeMessages.UnknownRequest);
-                    break;
+                        connection.TrySendResponse(NamedPipeMessages.UnknownRequest);
+                        break;
+                }
             }
         }
 
@@ -1050,12 +1057,7 @@ namespace GVFS.Mount
                     this.currentState = MountState.Unmounting;
 
                     connection.TrySendResponse(NamedPipeMessages.Unmount.Acknowledged);
-
-                    using (ITracer unmountActivity = this.tracer.StartActivity("Unmount", EventLevel.Informational, Keywords.Telemetry, metadata: null))
-                    {
-                        this.UnmountAndStopWorkingDirectoryCallbacks();
-                    }
-
+                    this.UnmountAndStopWorkingDirectoryCallbacks();
                     connection.TrySendResponse(NamedPipeMessages.Unmount.Completed);
 
                     this.unmountEvent.Set();
