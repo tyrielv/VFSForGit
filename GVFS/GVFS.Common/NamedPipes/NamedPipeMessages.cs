@@ -203,10 +203,13 @@ namespace GVFS.Common.NamedPipes
 
             public class Request
             {
-                public Request(string backupFolderPath, string folders)
+                public Request(string backupFolderPath, string folders, bool noStatus = false, bool recurse = false, bool skipDirty = false)
                 {
                     this.Folders = folders;
                     this.BackupFolderPath = backupFolderPath;
+                    this.NoStatus = noStatus;
+                    this.Recurse = recurse;
+                    this.SkipDirty = skipDirty;
                 }
 
                 public static Request FromMessage(Message message)
@@ -217,6 +220,12 @@ namespace GVFS.Common.NamedPipes
                 public string Folders { get; }
 
                 public string BackupFolderPath { get; }
+
+                public bool NoStatus { get; }
+
+                public bool Recurse { get; }
+
+                public bool SkipDirty { get; }
 
                 public Message CreateMessage()
                 {
