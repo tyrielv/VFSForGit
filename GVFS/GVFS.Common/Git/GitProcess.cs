@@ -482,12 +482,12 @@ namespace GVFS.Common.Git
             return this.InvokeGitInWorkingDirectoryRoot("checkout -f " + target, useReadObjectHook: false);
         }
 
-        public Result Reset(string target, string paths)
+        public Result Reset(string target, string paths, bool usePreCommandHook = true)
         {
-            return this.InvokeGitInWorkingDirectoryRoot($"reset {target} {paths}", useReadObjectHook: false);
+            return this.InvokeGitInWorkingDirectoryRoot($"reset {target} {paths}", useReadObjectHook: false, usePreCommandHook: usePreCommandHook);
         }
 
-        public Result Status(bool allowObjectDownloads, bool useStatusCache, bool showUntracked = false)
+        public Result Status(bool allowObjectDownloads, bool useStatusCache, bool showUntracked = false, bool usePreCommandHook = true, bool porcelain = false)
         {
             string command = "status";
             if (!useStatusCache)
@@ -495,12 +495,17 @@ namespace GVFS.Common.Git
                 command += " --no-deserialize";
             }
 
+            if (porcelain)
+            {
+                command += " --porcelain";
+            }
+
             if (showUntracked)
             {
                 command += " -uall";
             }
 
-            return this.InvokeGitInWorkingDirectoryRoot(command, useReadObjectHook: allowObjectDownloads);
+            return this.InvokeGitInWorkingDirectoryRoot(command, useReadObjectHook: allowObjectDownloads, usePreCommandHook: usePreCommandHook);
         }
 
         public Result StatusPorcelain()
@@ -1038,7 +1043,8 @@ namespace GVFS.Common.Git
             string command,
             bool useReadObjectHook,
             Action<StreamWriter> writeStdIn = null,
-            Action<string> parseStdOutLine = null)
+            Action<string> parseStdOutLine = null,
+            bool usePreCommandHook = true)
         {
             return this.InvokeGitImpl(
                 command,
@@ -1047,7 +1053,8 @@ namespace GVFS.Common.Git
                 useReadObjectHook: useReadObjectHook,
                 writeStdIn: writeStdIn,
                 parseStdOutLine: parseStdOutLine,
-                timeoutMs: -1);
+                timeoutMs: -1,
+                usePreCommandHook: usePreCommandHook);
         }
 
         /// <summary>

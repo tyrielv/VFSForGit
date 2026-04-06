@@ -457,16 +457,67 @@ namespace GVFS.Mount
 
             EventMetadata metadata = new EventMetadata();
             metadata.Add(nameof(request.Folders), request.Folders);
+            metadata.Add(nameof(request.NoStatus), request.NoStatus);
             metadata.Add(TracingConstants.MessageKey.InfoMessage, "Received dehydrate folders request");
             this.tracer.RelatedEvent(EventLevel.Informational, nameof(this.HandleDehydrateFolders), metadata);
 
             NamedPipeMessages.DehydrateFolders.Response response;
-            if (this.currentState == MountState.Ready)
+            if (this.currentState != MountState.Ready)
             {
+                response = new NamedPipeMessages.DehydrateFolders.Response(NamedPipeMessages.DehydrateFolders.MountNotReadyResult);
+                connection.TrySendResponse(response.CreateMessage());
+                return;
+            }
+
+            try
+            {
+                // Check git status on the mount side unless NoStatus was requested.
+                //
+                // We leverage the GitStatusCache when available (fast path). If the cache is not
+                // up-to-date, we fall back to a full status recalculation. Both paths use
+                // --porcelain for machine-parseable output: empty output means a clean tree. This
+                // also lets --skip-dirty and --recurse (future work) identify which specific
+                // paths are dirty.
+                //
+                // showUntracked: true (-uall) so untracked files (potential data loss) block
+                // dehydration. Files in .gitignore do NOT appear and won't block; they are
+                // preserved by the backup step.
+                //
+                // Note: there is a small race window between this status check and
+                // BackupFoldersWhileUnmounted (which sets MountState.Mounting to block new
+                // commands). This is the same race that existed when the CLI ran the check.
+                if (!request.NoStatus)
+                {
+                    bool cacheReady = this.fileSystemCallbacks.IsGitStatusCacheReadyAndUpToDate();
+
+                    GitProcess gitProcess = new GitProcess(this.enlistment);
+                    GitProcess.Result statusResult = gitProcess.Status(
+                        allowObjectDownloads: false,
+                        useStatusCache: cacheReady,
+                        showUntracked: true,
+                        porcelain: true);
+
+                    if (statusResult.ExitCodeIsFailure)
+                    {
+                        response = new NamedPipeMessages.DehydrateFolders.Response(NamedPipeMessages.DehydrateFolders.DirtyStatusResult);
+                        response.StatusOutput = "Failed to run git status: " + statusResult.Errors;
+                        connection.TrySendResponse(response.CreateMessage());
+                        return;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(statusResult.Output))
+                    {
+                        response = new NamedPipeMessages.DehydrateFolders.Response(NamedPipeMessages.DehydrateFolders.DirtyStatusResult);
+                        response.StatusOutput = statusResult.Output;
+                        connection.TrySendResponse(response.CreateMessage());
+                        return;
+                    }
+                }
+
                 response = new NamedPipeMessages.DehydrateFolders.Response(NamedPipeMessages.DehydrateFolders.DehydratedResult);
                 string[] folders = request.Folders.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
                 StringBuilder resetFolderPaths = new StringBuilder();
-                List<string> movedFolders = BackupFoldersWhileUnmounted(request, response, folders);
+                List<string> movedFolders = this.BackupFoldersWhileUnmounted(request, response, folders);
 
                 foreach (string folder in movedFolders)
                 {
@@ -484,7 +535,7 @@ namespace GVFS.Mount
 
                 // Since modified paths could have changed with the dehydrate, the paths that were dehydrated need to be reset in the index
                 string resetPaths = resetFolderPaths.ToString();
-                GitProcess gitProcess = new GitProcess(this.enlistment);
+                GitProcess resetGitProcess = new GitProcess(this.enlistment);
 
                 EventMetadata resetIndexMetadata = new EventMetadata();
                 resetIndexMetadata.Add(nameof(resetPaths), resetPaths);
@@ -495,8 +546,9 @@ namespace GVFS.Mount
                 {
                     // Because we've set resetForDehydrateInProgress to true, this call to 'git reset' will also force
                     // the projection to be updated (required because 'git reset' will adjust the skip worktree bits in
-                    // the index).
-                    refreshIndexResult = gitProcess.Reset(GVFSConstants.DotGit.HeadName, resetPaths);
+                    // the index). The post-index-changed hook's mount-side handler checks resetForDehydrateInProgress
+                    // and performs a special ForceIndexProjectionUpdate without touching the lock.
+                    refreshIndexResult = resetGitProcess.Reset(GVFSConstants.DotGit.HeadName, resetPaths);
                 }
                 finally
                 {
@@ -509,8 +561,9 @@ namespace GVFS.Mount
                 resetIndexMetadata.Add(TracingConstants.MessageKey.InfoMessage, $"{nameof(this.HandleDehydrateFolders)}: Reset git index");
                 this.tracer.RelatedEvent(EventLevel.Informational, $"{nameof(this.HandleDehydrateFolders)}_ResetIndex", resetIndexMetadata);
             }
-            else
+            catch (Exception e)
             {
+                this.tracer.RelatedError($"{nameof(this.HandleDehydrateFolders)}: Exception: {e}");
                 response = new NamedPipeMessages.DehydrateFolders.Response(NamedPipeMessages.DehydrateFolders.MountNotReadyResult);
             }
 

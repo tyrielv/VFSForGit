@@ -256,6 +256,65 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
             fileToWrite.BackingPath.ShouldNotExistOnDisk(this.fileSystem);
         }
 
+        /// <summary>
+        /// Temporary test: Verify that mount-side status check blocks dehydrate when the tree is dirty.
+        /// The mount process should use the GitStatusCache to detect dirty status and return DirtyStatusResult.
+        /// </summary>
+        [TestCase]
+        public void FolderDehydrateShouldFailWhenTreeIsDirty()
+        {
+            string folderToDehydrate = "GVFS";
+            TestPath fileToModify = new TestPath(this.Enlistment, Path.Combine(folderToDehydrate, "GVFS", "Program.cs"));
+
+            // Dirty the tree without committing
+            this.fileSystem.AppendAllText(fileToModify.VirtualPath, "Uncommitted content");
+
+            this.DehydrateShouldFail(
+                new[] { "uncommitted changes" },
+                noStatus: false,
+                foldersToDehydrate: folderToDehydrate);
+        }
+
+        /// <summary>
+        /// Temporary test: Verify that --no-status bypasses the mount-side status check,
+        /// allowing dehydrate to succeed even with a dirty tree.
+        /// </summary>
+        [TestCase]
+        public void FolderDehydrateWithNoStatusShouldSucceedWhenTreeIsDirty()
+        {
+            string folderToDehydrate = "Scripts";
+            TestPath fileToModify = new TestPath(this.Enlistment, Path.Combine("GVFS", "GVFS", "Program.cs"));
+
+            // Dirty the tree without committing (in a different folder than what we dehydrate)
+            this.fileSystem.AppendAllText(fileToModify.VirtualPath, "Uncommitted content");
+
+            this.DehydrateShouldSucceed(
+                new[] { $"{folderToDehydrate} {FolderDehydrateSuccessfulMessage}" },
+                confirm: true,
+                noStatus: true,
+                foldersToDehydrate: folderToDehydrate);
+
+            // Clean up the dirty file
+            GitProcess.Invoke(this.Enlistment.RepoRoot, "checkout -- .");
+        }
+
+        /// <summary>
+        /// Temporary test: Verify that the mount-side status check (using the cache)
+        /// allows dehydrate to succeed when the tree is clean.
+        /// </summary>
+        [TestCase]
+        public void FolderDehydrateCleanTreeShouldSucceedWithStatusCheck()
+        {
+            string folderToDehydrate = "Scripts";
+
+            // Tree is clean - dehydrate should succeed using the status cache
+            this.DehydrateShouldSucceed(
+                new[] { $"{folderToDehydrate} {FolderDehydrateSuccessfulMessage}" },
+                confirm: true,
+                noStatus: false,
+                foldersToDehydrate: folderToDehydrate);
+        }
+
         [TestCase]
         public void FolderDehydrateFolderThatWasDeleted()
         {
@@ -399,19 +458,21 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
             this.fileSystem.WriteAllText(fileToCreate.VirtualPath, "new file contents");
             fileToCreate.VirtualPath.ShouldBeAFile(this.fileSystem);
 
-            this.DehydrateShouldFail(new[] { "Running git status...Failed", "Untracked files:", "git status reported that you have dirty files" }, noStatus: false, foldersToDehydrate: folderToDehydrate);
+            this.DehydrateShouldFail(new[] { "uncommitted changes" }, noStatus: false, foldersToDehydrate: folderToDehydrate);
             GitProcess.Invoke(this.Enlistment.RepoRoot, "clean -xdf");
         }
 
         [TestCase]
-        public void FolderDehydrateDirtyStatusWithNoStatusShouldFail()
+        public void FolderDehydrateDirtyStatusWithNoStatusShouldSucceed()
         {
-            string folderToDehydrate = "GVFS";
-            TestPath fileToCreate = new TestPath(this.Enlistment, Path.Combine(folderToDehydrate, $"{nameof(this.FolderDehydrateDirtyStatusWithNoStatusShouldFail)}.txt"));
+            string folderToDehydrate = "Scripts";
+            TestPath fileToCreate = new TestPath(this.Enlistment, Path.Combine("GVFS", $"{nameof(this.FolderDehydrateDirtyStatusWithNoStatusShouldSucceed)}.txt"));
             this.fileSystem.WriteAllText(fileToCreate.VirtualPath, "new file contents");
             fileToCreate.VirtualPath.ShouldBeAFile(this.fileSystem);
 
-            this.DehydrateShouldFail(new[] { "Dehydrate --no-status not valid with --folders" }, noStatus: true, foldersToDehydrate: folderToDehydrate);
+            // --no-status skips the mount-side status check, so dehydrate should succeed
+            // even though there are untracked files (in a different folder)
+            this.DehydrateShouldSucceed(new[] { $"{folderToDehydrate} {FolderDehydrateSuccessfulMessage}" }, confirm: true, noStatus: true, foldersToDehydrate: folderToDehydrate);
             GitProcess.Invoke(this.Enlistment.RepoRoot, "clean -xdf");
         }
 

@@ -199,6 +199,7 @@ namespace GVFS.Common.NamedPipes
         {
             public const string Dehydrate = "Dehydrate";
             public const string DehydratedResult = "Dehydrated";
+            public const string DirtyStatusResult = "DirtyStatus";
             public const string MountNotReadyResult = "MountNotReady";
 
             public class Request
@@ -243,6 +244,7 @@ namespace GVFS.Common.NamedPipes
                 }
 
                 public string Result { get; }
+                public string StatusOutput { get; set; }
                 public List<string> SuccessfulFolders { get; }
                 public List<string> FailedFolders { get; }
 

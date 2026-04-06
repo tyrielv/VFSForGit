@@ -562,6 +562,26 @@ namespace GVFS.Virtualization
             }
         }
 
+        /// <summary>
+        /// Ensures the git status cache is up-to-date by calling RefreshAndWait.
+        /// If the cache state is Clean, this is a no-op. If Dirty, it performs a synchronous rebuild.
+        /// WARNING: The rebuild runs a git process that acquires the GVFS lock via pre-command hook.
+        /// Do NOT call this while the GVFS lock is already held — it will deadlock.
+        /// </summary>
+        public void WaitForUpdatedGitStatusCache()
+        {
+            this.gitStatusCache.RefreshAndWait();
+        }
+
+        /// <summary>
+        /// Returns true if the git status cache is in a Clean state (up-to-date).
+        /// Safe to call while holding the GVFS lock (does not trigger any git processes).
+        /// </summary>
+        public bool IsGitStatusCacheReadyAndUpToDate()
+        {
+            return this.gitStatusCache.IsCacheReadyAndUpToDate();
+        }
+
         public EnlistmentHydrationSummary GetCachedHydrationSummary()
         {
             return this.gitStatusCache.GetCachedHydrationSummary();

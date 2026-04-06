@@ -187,7 +187,17 @@ from a parent of the folders list.
                     return;
                 }
 
-                bool cleanStatus = this.StatusChecked || this.CheckGitStatus(tracer, enlistment, fullDehydrate);
+                bool cleanStatus;
+                if (fullDehydrate)
+                {
+                    cleanStatus = this.StatusChecked || this.CheckGitStatus(tracer, enlistment, fullDehydrate);
+                }
+                else
+                {
+                    // For folder dehydrate, the mount process handles status checking
+                    // using the GitStatusCache (faster than a full recalculation)
+                    cleanStatus = true;
+                }
 
                 string backupRoot = Path.GetFullPath(Path.Combine(enlistment.EnlistmentRoot, "dehydrate_backup", DateTime.Now.ToString("yyyyMMdd_HHmmss")));
                 this.Output.WriteLine();
@@ -414,7 +424,8 @@ from a parent of the folders list.
 
                     NamedPipeMessages.DehydrateFolders.Request request = new NamedPipeMessages.DehydrateFolders.Request(
                         folders: string.Join(";", folders),
-                        backupFolderPath: backupFolder);
+                        backupFolderPath: backupFolder,
+                        noStatus: this.NoStatus);
                     pipeClient.SendRequest(request.CreateMessage());
                     response = NamedPipeMessages.DehydrateFolders.Response.FromMessage(NamedPipeMessages.Message.FromString(pipeClient.ReadRawResponse()));
                 }
@@ -426,6 +437,20 @@ from a parent of the folders list.
 
             if (response != null)
             {
+                if (response.Result == NamedPipeMessages.DehydrateFolders.DirtyStatusResult)
+                {
+                    this.Output.WriteLine();
+                    if (!string.IsNullOrEmpty(response.StatusOutput))
+                    {
+                        this.WriteMessage(tracer, response.StatusOutput);
+                    }
+
+                    this.WriteMessage(tracer, "git status reported that you have uncommitted changes");
+                    this.WriteMessage(tracer, "Either commit your changes or reset and clean your working directory.");
+                    this.ReportErrorAndExit(tracer, $"Aborted {this.ActionName}");
+                    return;
+                }
+
                 foreach (string folder in response.SuccessfulFolders)
                 {
                     this.WriteMessage(tracer, $"{folder} folder {this.ActionName} successful.");
