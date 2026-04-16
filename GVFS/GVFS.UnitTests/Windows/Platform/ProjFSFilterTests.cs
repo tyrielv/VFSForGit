@@ -29,7 +29,7 @@ namespace GVFS.UnitTests.Windows.Platform
 
         // .NET doesn't allow us to create custom FileVersionInfos, and so use the version for our assembly and mock
         // the version comparison methods
-        private readonly FileVersionInfo dummyVersionInfo = FileVersionInfo.GetVersionInfo(Assembly.GetExecutingAssembly().Location);
+        private readonly FileVersionInfo dummyVersionInfo = FileVersionInfo.GetVersionInfo(Environment.ProcessPath);
 
         private Mock<PhysicalFileSystem> mockFileSystem;
         private MockTracer mockTracer;

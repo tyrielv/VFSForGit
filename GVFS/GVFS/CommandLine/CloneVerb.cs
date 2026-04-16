@@ -284,7 +284,7 @@ namespace GVFS.CommandLine
                         {
                             try
                             {
-                                string gvfsExecutable = Assembly.GetExecutingAssembly().Location;
+                                string gvfsExecutable = Environment.ProcessPath;
                                 Process.Start(new ProcessStartInfo(
                                     fileName: gvfsExecutable,
                                     arguments: "prefetch --commits")

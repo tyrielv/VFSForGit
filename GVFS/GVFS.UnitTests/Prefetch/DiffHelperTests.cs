@@ -167,7 +167,7 @@ namespace GVFS.UnitTests.Prefetch
 
         private static string GetDataPath(string fileName)
         {
-            string workingDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+            string workingDirectory = Path.GetDirectoryName(Environment.ProcessPath);
             return Path.Combine(workingDirectory, "Data", fileName);
         }
     }

@@ -1,7 +1,6 @@
-﻿<Project Sdk="Microsoft.Build.NoTargets">
+<Project Sdk="Microsoft.Build.NoTargets">
 
   <PropertyGroup>
-    <TargetFramework>net471</TargetFramework>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
   </PropertyGroup>
 
@@ -11,7 +10,6 @@
   </ItemDefinitionGroup>
 
   <ItemGroup>
-    <PackageReference Include="GVFS.ProjFS" />
     <PackageReference Include="GVFS.VCRuntime" />
     <PackageReference Include="MicroBuild.Core" ExcludeAssets="none" />
   </ItemGroup>
@@ -28,7 +26,7 @@
   </ItemGroup>
 
   <Target Name="CreatePayload" AfterTargets="CoreBuild" BeforeTargets="SignFiles">
-    <Exec Command='"$(MSBuildThisFileDirectory)layout.bat" $(Configuration) $(GVFSVersion) "$(PkgGVFS_ProjFS)" "$(PkgGVFS_VCRuntime)" "$(OutputPath)"' />
+    <Exec Command='"$(MSBuildThisFileDirectory)layout.bat" $(Configuration) $(GVFSVersion) "$(PkgGVFS_VCRuntime)" "$(OutputPath)"' />
   </Target>
 
   <Target Name="CleanPayload" BeforeTargets="AfterClean">
@@ -54,3 +52,4 @@
   </ItemGroup>
 
 </Project>
+
