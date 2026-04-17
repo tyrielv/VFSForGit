@@ -50,22 +50,18 @@ namespace GVFS.Service.Handlers
                 {
                     if (!isPrjfltServiceInstalled || !isPrjfltDriverInstalled)
                     {
-                        uint windowsBuildNumber;
-                        bool isInboxProjFSFinalAPI;
                         bool isProjFSFeatureAvailable;
-                        if (ProjFSFilter.TryEnableOrInstallDriver(tracer, fileSystem, out windowsBuildNumber, out isInboxProjFSFinalAPI, out isProjFSFeatureAvailable))
+                        if (ProjFSFilter.TryEnableOptionalFeature(tracer, fileSystem, out isProjFSFeatureAvailable))
                         {
                             isPrjfltServiceInstalled = true;
                             isPrjfltDriverInstalled = true;
                         }
                         else
                         {
-                            error = "Failed to install (or enable) PrjFlt";
+                            error = "Failed to enable PrjFlt optional feature";
                             tracer.RelatedError($"{nameof(TryEnablePrjFlt)}: {error}");
                         }
 
-                        prjFltHealthMetadata.Add(nameof(windowsBuildNumber), windowsBuildNumber);
-                        prjFltHealthMetadata.Add(nameof(isInboxProjFSFinalAPI), isInboxProjFSFinalAPI);
                         prjFltHealthMetadata.Add(nameof(isProjFSFeatureAvailable), isProjFSFeatureAvailable);
                     }
 
@@ -83,47 +79,11 @@ namespace GVFS.Service.Handlers
                     }
                 }
 
-                // Check again if the native library is installed.  If the code above enabled the
-                // ProjFS optional feature then the native library will now be installed.
                 isNativeProjFSLibInstalled = ProjFSFilter.IsNativeLibInstalled(tracer, fileSystem);
                 if (!isNativeProjFSLibInstalled)
                 {
-                    if (isPrjfltServiceRunning)
-                    {
-                        tracer.RelatedInfo($"{nameof(TryEnablePrjFlt)}: Native ProjFS library is not installed, attempting to copy version packaged with VFS for Git");
-
-                        EventLevel eventLevel;
-                        EventMetadata copyNativeLibMetadata = new EventMetadata();
-                        copyNativeLibMetadata.Add("Area", EtwArea);
-                        string copyNativeDllError = string.Empty;
-                        if (ProjFSFilter.TryCopyNativeLibIfDriverVersionsMatch(tracer, new PhysicalFileSystem(), out copyNativeDllError))
-                        {
-                            isNativeProjFSLibInstalled = true;
-
-                            eventLevel = EventLevel.Warning;
-                            copyNativeLibMetadata.Add(TracingConstants.MessageKey.WarningMessage, $"{nameof(TryEnablePrjFlt)}: Successfully copied ProjFS native library");
-                        }
-                        else
-                        {
-                            error = $"Native ProjFS library is not installed and could not be copied: {copyNativeDllError}";
-
-                            eventLevel = EventLevel.Error;
-                            copyNativeLibMetadata.Add(nameof(copyNativeDllError), copyNativeDllError);
-                            copyNativeLibMetadata.Add(TracingConstants.MessageKey.ErrorMessage, $"{nameof(TryEnablePrjFlt)}: Failed to copy ProjFS native library");
-                        }
-
-                        copyNativeLibMetadata.Add(nameof(isNativeProjFSLibInstalled), isNativeProjFSLibInstalled);
-                        tracer.RelatedEvent(
-                            eventLevel,
-                            $"{nameof(TryEnablePrjFlt)}_{nameof(ProjFSFilter.TryCopyNativeLibIfDriverVersionsMatch)}",
-                            copyNativeLibMetadata,
-                            Keywords.Telemetry);
-                    }
-                    else
-                    {
-                        error = "Native ProjFS library is not installed, did not attempt to copy library because prjflt service is not running";
-                        tracer.RelatedError($"{nameof(TryEnablePrjFlt)}: {error}");
-                    }
+                    error = "Native ProjFS library is not installed. Ensure the Windows 'Client-ProjFS' optional feature is enabled.";
+                    tracer.RelatedError($"{nameof(TryEnablePrjFlt)}: {error}");
                 }
 
                 bool isAutoLoggerEnabled = ProjFSFilter.IsAutoLoggerEnabled(tracer);
