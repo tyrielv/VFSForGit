@@ -253,6 +253,12 @@ namespace GVFS.CommandLine
                     {
                         trustPackIndexes = repo.GetConfigBoolOrDefault(GVFSConstants.GitConfig.TrustPackIndexes, GVFSConstants.GitConfig.TrustPackIndexesDefault);
                     }
+
+                    tracer.Stop(new EventMetadata
+                    {
+                        { "Remote", Uri.EscapeDataString(enlistment.RepoUrl) },
+                        { "Success", cloneResult.Success },
+                    });
                 }
 
                 if (cloneResult.Success)

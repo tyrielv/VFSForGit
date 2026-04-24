@@ -21,6 +21,7 @@ namespace GVFS.UnitTests.Tracing
             const string enlistmentId = "test-enlistmentId";
             const string mountId = "test-mountId";
             const string gitCommandSessionId = "test_sessionId";
+            const string activityId = "test-activityId";
             const string payload = "test-payload";
 
             TelemetryDaemonEventListener.PipeMessage message = new TelemetryDaemonEventListener.PipeMessage
@@ -35,6 +36,7 @@ namespace GVFS.UnitTests.Tracing
                     EnlistmentId = enlistmentId,
                     MountId = mountId,
                     GitCommandSessionId = gitCommandSessionId,
+                    ActivityId = activityId,
                     Json = payload
                 },
             };
@@ -52,10 +54,11 @@ namespace GVFS.UnitTests.Tracing
                 root.GetProperty("eventOpcode").GetInt32().ShouldEqual((int)opcode);
 
                 JsonElement payloadElement = root.GetProperty("payload");
-                payloadElement.EnumerateObject().Count().ShouldEqual(4);
+                payloadElement.EnumerateObject().Count().ShouldEqual(5);
                 payloadElement.GetProperty("enlistmentId").GetString().ShouldEqual(enlistmentId);
                 payloadElement.GetProperty("mountId").GetString().ShouldEqual(mountId);
                 payloadElement.GetProperty("gitCommandSessionId").GetString().ShouldEqual(gitCommandSessionId);
+                payloadElement.GetProperty("activityId").GetString().ShouldEqual(activityId);
                 payloadElement.GetProperty("json").GetString().ShouldEqual(payload);
             }
         }

@@ -119,10 +119,9 @@ namespace GVFS.Common.Tracing
                     EnlistmentId = this.enlistmentId,
                     MountId = this.mountId,
                     GitCommandSessionId = this.GitCommandSessionId,
+                    ActivityId = message.ActivityId == Guid.Empty ? null : message.ActivityId.ToString(),
                     Json = message.Payload
                 },
-
-                // Other TraceEventMessage properties are not used
             };
 
             return pipeMessage.ToJson();
@@ -161,6 +160,8 @@ namespace GVFS.Common.Tracing
                 public string MountId { get; set; }
                 [JsonPropertyName("gitCommandSessionId")]
                 public string GitCommandSessionId { get; set; }
+                [JsonPropertyName("activityId")]
+                public string ActivityId { get; set; }
                 [JsonPropertyName("json")]
                 public string Json { get; set; }
             }
