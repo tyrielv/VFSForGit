@@ -1,11 +1,13 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using GVFS.Common;
 using GVFS.FunctionalTests.Properties;
+using GVFS.FunctionalTests.Should;
 using GVFS.FunctionalTests.Tests.EnlistmentPerTestCase;
 using NUnit.Framework;
 
@@ -84,7 +86,7 @@ namespace GVFS.FunctionalTests.Tests.GitCommands
         /// See https://github.com/microsoft/VFSForGit/issues/1901
         /// </summary>
         [TestCase]
-        public void RestoreAfterDeleteNesteredDirectory()
+        public void RestoreAfterDeleteNestedDirectory()
         {
             // Delete a directory with nested subdirectories and files.
             this.ValidateNonGitCommand("cmd.exe", "/c \"rmdir /s /q GVFlt_DeleteFileTest\"");
@@ -93,6 +95,42 @@ namespace GVFS.FunctionalTests.Tests.GitCommands
             this.ValidateGitCommand("restore .");
 
             this.FilesShouldMatchCheckoutOfSourceBranch();
+        }
+
+        /// <summary>
+        /// Reproduction of a reported issue:
+        /// Running "git checkout HEAD~1 -- path" for a modified virtual file fails
+        /// with "error: unable to unlink old 'path': No such file or directory"
+        ///
+        /// When a file has skip-worktree set (virtual placeholder, not hydrated),
+        /// git's checkout-path code calls unlink() before writing the old version.
+        /// The unlink fails because the file doesn't physically exist on disk —
+        /// it's a ProjFS virtual projection. The checkout then aborts without
+        /// updating the file.
+        ///
+        /// See https://microsoft.visualstudio.com/OS/_workitems/edit/62260193
+        /// </summary>
+        [TestCase]
+        public void CheckoutPreviousCommitModifiedFile()
+        {
+            // FunctionalTests/20170206_Conflict_Source modifies files under
+            // Test_ConflictTests/ModifiedFiles/ relative to its parent.
+            const string ModifiedFilesCommit = "51d15f7584e81d59d44c1511ce17d7c493903390";
+            const string StartingCommit = "db95d631e379d366d26d899523f8136a77441914";
+
+            this.ControlGitRepo.Fetch(ModifiedFilesCommit);
+            this.ControlGitRepo.Fetch(StartingCommit);
+
+            this.ValidateGitCommand($"checkout -b FunctionalTests/CheckoutModifiedFileRepro {ModifiedFilesCommit}");
+
+            // Checkout a single modified file from the previous commit.
+            // The file is a virtual placeholder (not hydrated). Git tries to
+            // unlink it before writing the old version, which fails because
+            // the file doesn't physically exist on disk.
+            this.ValidateGitCommand("checkout HEAD~1 -- Test_ConflictTests/ModifiedFiles/ChangeInSource.txt");
+
+            // Verify the file was actually restored to the previous version.
+            this.FileContentsShouldMatch("Test_ConflictTests", "ModifiedFiles", "ChangeInSource.txt");
         }
     }
 }
