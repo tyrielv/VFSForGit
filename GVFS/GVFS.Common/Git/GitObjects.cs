@@ -107,6 +107,40 @@ namespace GVFS.Common.Git
             }
         }
 
+        /// <summary>
+        /// Returns true if the pack at <paramref name="packPath"/> is a usable prefetch pack:
+        /// it has a matching .idx file and no .incomplete marker.
+        /// </summary>
+        public bool IsUsablePrefetchPack(string packPath)
+        {
+            string idxPath = Path.ChangeExtension(packPath, ".idx");
+            string incompletePath = Path.ChangeExtension(packPath, GVFSConstants.InProgressPrefetchMarkerExtension);
+
+            return this.fileSystem.FileExists(idxPath)
+                && !this.fileSystem.FileExists(incompletePath);
+        }
+
+        /// <summary>
+        /// Returns true if at least one usable prefetch pack exists in the pack root.
+        /// A usable pack has a matching .idx and no .incomplete marker.
+        /// </summary>
+        public bool HasUsablePrefetchPacks()
+        {
+            string[] prefetchPacks = this.ReadPackFileNames(
+                this.Enlistment.GitPackRoot,
+                GVFSConstants.PrefetchPackPrefix);
+
+            foreach (string packPath in prefetchPacks)
+            {
+                if (this.IsUsablePrefetchPack(packPath))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private void DeleteStaleIncompletePrefetchPackAndIdxs()
         {
             string[] packFiles = this.ReadPackFileNames(this.Enlistment.GitPackRoot, GVFSConstants.PrefetchPackPrefix);

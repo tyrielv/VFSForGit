@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -283,6 +284,84 @@ namespace GVFS.FunctionalTests.Tests.MultiEnlistmentTests
             File.ReadAllText(Path.Combine(enlistment2.RepoRoot, WellKnownFile));
         }
 
+        [TestCase]
+        public void SecondCloneSucceedsWithMissingTreesAndPrefetchPacks()
+        {
+            // Scenario: prefetch packs exist in shared cache, the target commit and
+            // root tree are present as loose objects, but subtrees are missing.
+            // The checkout fallback must re-download the commit pack.
+            string newCachePath = Path.Combine(this.localCacheParentPath, ".customGvfsCache3");
+            GVFSFunctionalTestEnlistment enlistment1 = this.CreateNewEnlistment(localCacheRoot: newCachePath);
+            this.AlternatesFileShouldHaveGitObjectsRoot(enlistment1);
+
+            // While mounted, force-download only the commit and root tree for
+            // WellKnownBranch. The VFS read-object hook saves these as loose
+            // objects in the shared cache.
+            string command = "cat-file -p origin/" + WellKnownBranch + "^{tree}";
+            ProcessResult result = GitHelpers.InvokeGitAgainstGVFSRepo(enlistment1.RepoRoot, command);
+            result.ExitCode.ShouldEqual(0, $"git {command} failed with error: " + result.Errors);
+
+            string packRoot = enlistment1.GetPackRoot(this.fileSystem);
+            string objectRoot = enlistment1.GetObjectRoot(this.fileSystem);
+
+            // Get a known object SHA to seed the fake prefetch pack (use default
+            // branch tip — it's already in the cache as a loose object).
+            string seedSha = GitProcess.Invoke(enlistment1.RepoRoot, "rev-parse HEAD").Trim();
+
+            enlistment1.UnmountGVFS();
+
+            // Create the fake prefetch pack BEFORE deleting real packs, so that
+            // pack-objects can find the seed object in the existing packs.
+            this.CreateMinimalPrefetchPack(enlistment1.RepoRoot, packRoot, seedSha);
+
+            // Surgery: delete all NON-fake packs + MIDX so subtrees are gone, but
+            // leave loose objects (which include WellKnownBranch commit + root tree).
+            this.DeletePackFilesExcept(packRoot, prefix: "prefetch-9999999999");
+            this.DeleteMultiPackIndex(packRoot);
+
+            // Clone2 on WellKnownBranch: CommitAndRootTreeExists → true (loose),
+            // HasUsablePrefetchPacks → true, but subtrees are missing.
+            // The checkout fallback must detect "unable to read tree" and re-download.
+            GVFSFunctionalTestEnlistment enlistment2 = this.CreateNewEnlistment(localCacheRoot: newCachePath, branch: WellKnownBranch, skipPrefetch: true);
+            File.ReadAllText(Path.Combine(enlistment2.RepoRoot, WellKnownFile));
+        }
+
+        [TestCase]
+        public void SecondCloneWithPrefetchPacksButMissingCommit()
+        {
+            // Scenario: prefetch packs exist in the shared cache but the target
+            // commit is NOT present. This exercises the deferred-download path
+            // (skippedCommitDownload) added by the clone optimization.
+            string newCachePath = Path.Combine(this.localCacheParentPath, ".customGvfsCache4");
+            GVFSFunctionalTestEnlistment enlistment1 = this.CreateNewEnlistment(localCacheRoot: newCachePath);
+            this.AlternatesFileShouldHaveGitObjectsRoot(enlistment1);
+
+            string packRoot = enlistment1.GetPackRoot(this.fileSystem);
+
+            // Get a known object SHA to seed the fake prefetch pack.
+            string seedSha = GitProcess.Invoke(enlistment1.RepoRoot, "rev-parse HEAD").Trim();
+
+            enlistment1.UnmountGVFS();
+
+            // Create the fake prefetch pack BEFORE deleting real packs, so that
+            // pack-objects can find the seed object in the existing packs.
+            this.CreateMinimalPrefetchPack(enlistment1.RepoRoot, packRoot, seedSha);
+
+            // Surgery: delete all NON-fake packs and MIDX. The real prefetch packs
+            // contain WellKnownBranch's commit; removing them ensures it's absent.
+            // Leave loose objects and our fake prefetch pack.
+            this.DeletePackFilesExcept(packRoot, prefix: "prefetch-9999999999");
+            this.DeleteMultiPackIndex(packRoot);
+
+            // Clone2 on WellKnownBranch: CommitAndRootTreeExists → false,
+            // HasUsablePrefetchPacks → true, skippedCommitDownload = true.
+            // CreateBranchWithUpstream or TryDownloadRootGitAttributes will fail
+            // and trigger the deferred commit download.
+            GVFSFunctionalTestEnlistment enlistment2 = this.CreateNewEnlistment(localCacheRoot: newCachePath, branch: WellKnownBranch, skipPrefetch: true);
+            enlistment2.Status().ShouldContain("Mount status: Ready");
+            File.ReadAllText(Path.Combine(enlistment2.RepoRoot, WellKnownFile));
+        }
+
         // Override OnTearDownEnlistmentsDeleted rathern than using [TearDown] as the enlistments need to be unmounted before
         // localCacheParentPath can be deleted (as the SQLite blob sizes database cannot be deleted while GVFS is mounted)
         protected override void OnTearDownEnlistmentsDeleted()
@@ -321,6 +400,103 @@ namespace GVFS.FunctionalTests.Tests.MultiEnlistmentTests
                 {
                     File.ReadAllText(allFiles[i]);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Deletes all .pack, .idx, .keep, .rev, .bitmap, .incomplete files from the
+        /// given pack directory EXCEPT those whose file name starts with the given prefix.
+        /// </summary>
+        private void DeletePackFilesExcept(string packRoot, string prefix)
+        {
+            foreach (string file in Directory.EnumerateFiles(packRoot))
+            {
+                string fileName = Path.GetFileName(file);
+                if (fileName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string ext = Path.GetExtension(file);
+                if (ext.Equals(".pack", StringComparison.OrdinalIgnoreCase)
+                    || ext.Equals(".idx", StringComparison.OrdinalIgnoreCase)
+                    || ext.Equals(".keep", StringComparison.OrdinalIgnoreCase)
+                    || ext.Equals(".rev", StringComparison.OrdinalIgnoreCase)
+                    || ext.Equals(".bitmap", StringComparison.OrdinalIgnoreCase)
+                    || ext.Equals(".incomplete", StringComparison.OrdinalIgnoreCase))
+                {
+                    File.SetAttributes(file, FileAttributes.Normal);
+                    File.Delete(file);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Deletes the multi-pack-index and related files from the pack directory.
+        /// </summary>
+        private void DeleteMultiPackIndex(string packRoot)
+        {
+            foreach (string file in Directory.EnumerateFiles(packRoot))
+            {
+                if (Path.GetFileName(file).StartsWith("multi-pack-index", StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Delete(file);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Creates a minimal prefetch-named pack containing a single object.
+        /// Uses a temporary bare repo to run git pack-objects without VFS hooks.
+        /// </summary>
+        private void CreateMinimalPrefetchPack(string repoRoot, string packRoot, string objectSha)
+        {
+            // Create a temporary bare repo that borrows objects from the enlistment
+            // via alternates, so pack-objects can find the seed object.
+            string tempBareRepo = Path.Combine(Path.GetTempPath(), "gvfs_fakeprefetch_" + Guid.NewGuid().ToString("N").Substring(0, 8));
+            try
+            {
+            Directory.CreateDirectory(tempBareRepo);
+            GitProcess.Invoke(tempBareRepo, "init --bare .");
+
+                // Point alternates at the enlistment's .git/objects and the shared cache
+                string alternatesPath = Path.Combine(tempBareRepo, "objects", "info", "alternates");
+                string enlistmentObjects = Path.Combine(repoRoot, ".git", "objects");
+                string alternatesContent = Path.Combine(enlistmentObjects, "info", "alternates");
+                string sharedCacheRoot = File.Exists(alternatesContent) ? File.ReadAllText(alternatesContent).Trim() : "";
+
+                string alternatesLines = enlistmentObjects;
+                if (!string.IsNullOrEmpty(sharedCacheRoot))
+                {
+                    alternatesLines += "\n" + sharedCacheRoot;
+                }
+
+                File.WriteAllText(alternatesPath, alternatesLines);
+
+                // Use pack-objects to create a pack with just the seed object.
+                // The prefix includes a fake timestamp so the pack matches the
+                // prefetch-<timestamp>-<hash>.pack naming convention.
+                string packPrefix = Path.Combine(packRoot, "prefetch-9999999999");
+
+                MemoryStream inputStream = new MemoryStream(
+                Encoding.ASCII.GetBytes(objectSha + "\n"));
+
+                ProcessResult packResult = GitProcess.InvokeProcess(
+                    tempBareRepo,
+                "-c safe.bareRepository=all pack-objects " + packPrefix,
+                    inputStream: inputStream);
+                packResult.ExitCode.ShouldEqual(0, "git pack-objects failed: " + packResult.Errors);
+
+                // pack-objects outputs the pack hash; verify the files were created.
+                string packHash = packResult.Output.Trim();
+                string expectedPack = packPrefix + "-" + packHash + ".pack";
+                string expectedIdx = packPrefix + "-" + packHash + ".idx";
+                expectedPack.ShouldBeAFile(this.fileSystem);
+                expectedIdx.ShouldBeAFile(this.fileSystem);
+            }
+            finally
+            {
+                RepositoryHelpers.DeleteTestDirectory(tempBareRepo);
             }
         }
     }

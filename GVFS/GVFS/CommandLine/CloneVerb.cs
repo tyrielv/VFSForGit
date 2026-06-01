@@ -361,29 +361,6 @@ namespace GVFS.CommandLine
             return true;
         }
 
-        private static bool HasUsablePrefetchPacks(
-            GVFSGitObjects gitObjects,
-            GVFSEnlistment enlistment,
-            PhysicalFileSystem fileSystem)
-        {
-            string[] prefetchPacks = gitObjects.ReadPackFileNames(
-                enlistment.GitPackRoot,
-                GVFSConstants.PrefetchPackPrefix);
-
-            foreach (string packPath in prefetchPacks)
-            {
-                string idxPath = Path.ChangeExtension(packPath, ".idx");
-                string incompletePath = Path.ChangeExtension(packPath, GVFSConstants.InProgressPrefetchMarkerExtension);
-
-                if (fileSystem.FileExists(idxPath) && !fileSystem.FileExists(incompletePath))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         private Result TryCreateEnlistment(
             string fullEnlistmentRootPathParameter,
             string normalizedEnlistementRootPath,
@@ -647,7 +624,7 @@ namespace GVFS.CommandLine
             {
                 tracer.RelatedInfo("Commit {0} already exists locally, skipping download", commitId);
             }
-            else if (HasUsablePrefetchPacks(gitObjects, enlistment, fileSystem))
+            else if (gitObjects.HasUsablePrefetchPacks())
             {
                 tracer.RelatedInfo("Prefetch packs found in shared cache but commit {0} is not present; deferring download", commitId);
                 skippedCommitDownload = true;

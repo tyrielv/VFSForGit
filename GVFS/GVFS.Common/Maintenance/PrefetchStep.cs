@@ -174,33 +174,35 @@ namespace GVFS.Common.Maintenance
             {
                 long timestamp = orderedPacks[i].Timestamp;
                 string packPath = orderedPacks[i].Path;
-                string idxPath = Path.ChangeExtension(packPath, ".idx");
-                if (!this.Context.FileSystem.FileExists(idxPath))
+
+                if (this.GitObjects.IsUsablePrefetchPack(packPath))
                 {
-                    EventMetadata metadata = this.CreateEventMetadata();
-                    metadata.Add("pack", packPath);
-                    metadata.Add("idxPath", idxPath);
-                    metadata.Add("timestamp", timestamp);
-                    GitProcess.Result indexResult = this.RunGitCommand(process => this.GitObjects.IndexPackFile(packPath, process), nameof(this.GitObjects.IndexPackFile));
+                    maxGoodTimestamp = timestamp;
+                    continue;
+                }
 
-                    if (indexResult.ExitCodeIsFailure)
-                    {
-                        firstBadPack = i;
+                // Pack has no .incomplete marker (filtered above) but is missing its .idx.
+                // Try to regenerate the index.
+                string idxPath = Path.ChangeExtension(packPath, ".idx");
+                EventMetadata metadata = this.CreateEventMetadata();
+                metadata.Add("pack", packPath);
+                metadata.Add("idxPath", idxPath);
+                metadata.Add("timestamp", timestamp);
+                GitProcess.Result indexResult = this.RunGitCommand(process => this.GitObjects.IndexPackFile(packPath, process), nameof(this.GitObjects.IndexPackFile));
 
-                        this.Context.Tracer.RelatedWarning(metadata, $"{nameof(this.TryGetMaxGoodPrefetchTimestamp)}: Found pack file that's missing idx file, and failed to regenerate idx");
-                        break;
-                    }
-                    else
-                    {
-                        maxGoodTimestamp = timestamp;
+                if (indexResult.ExitCodeIsFailure)
+                {
+                    firstBadPack = i;
 
-                        metadata.Add(TracingConstants.MessageKey.InfoMessage, $"{nameof(this.TryGetMaxGoodPrefetchTimestamp)}: Found pack file that's missing idx file, and regenerated idx");
-                        this.Context.Tracer.RelatedEvent(EventLevel.Informational, $"{nameof(this.TryGetMaxGoodPrefetchTimestamp)}_RebuildIdx", metadata);
-                    }
+                    this.Context.Tracer.RelatedWarning(metadata, $"{nameof(this.TryGetMaxGoodPrefetchTimestamp)}: Found pack file that's missing idx file, and failed to regenerate idx");
+                    break;
                 }
                 else
                 {
                     maxGoodTimestamp = timestamp;
+
+                    metadata.Add(TracingConstants.MessageKey.InfoMessage, $"{nameof(this.TryGetMaxGoodPrefetchTimestamp)}: Found pack file that's missing idx file, and regenerated idx");
+                    this.Context.Tracer.RelatedEvent(EventLevel.Informational, $"{nameof(this.TryGetMaxGoodPrefetchTimestamp)}_RebuildIdx", metadata);
                 }
             }
 
