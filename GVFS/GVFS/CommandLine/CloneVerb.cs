@@ -361,6 +361,29 @@ namespace GVFS.CommandLine
             return true;
         }
 
+        private static bool HasUsablePrefetchPacks(
+            GVFSGitObjects gitObjects,
+            GVFSEnlistment enlistment,
+            PhysicalFileSystem fileSystem)
+        {
+            string[] prefetchPacks = gitObjects.ReadPackFileNames(
+                enlistment.GitPackRoot,
+                GVFSConstants.PrefetchPackPrefix);
+
+            foreach (string packPath in prefetchPacks)
+            {
+                string idxPath = Path.ChangeExtension(packPath, ".idx");
+                string incompletePath = Path.ChangeExtension(packPath, GVFSConstants.InProgressPrefetchMarkerExtension);
+
+                if (fileSystem.FileExists(idxPath) && !fileSystem.FileExists(incompletePath))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private Result TryCreateEnlistment(
             string fullEnlistmentRootPathParameter,
             string normalizedEnlistementRootPath,
@@ -617,15 +640,30 @@ namespace GVFS.CommandLine
             GVFSContext context = new GVFSContext(tracer, fileSystem, gitRepo, enlistment);
             GVFSGitObjects gitObjects = new GVFSGitObjects(context, objectRequestor);
 
-            if (!this.TryDownloadCommit(
-                refs.GetTipCommitId(branch),
-                enlistment,
-                objectRequestor,
-                gitObjects,
-                gitRepo,
-                out errorMessage))
+            string commitId = refs.GetTipCommitId(branch);
+            bool skippedCommitDownload = false;
+
+            if (gitRepo.CommitAndRootTreeExists(commitId, out _))
             {
-                return new Result(errorMessage);
+                tracer.RelatedInfo("Commit {0} already exists locally, skipping download", commitId);
+            }
+            else if (HasUsablePrefetchPacks(gitObjects, enlistment, fileSystem))
+            {
+                tracer.RelatedInfo("Prefetch packs found in shared cache but commit {0} is not present; deferring download", commitId);
+                skippedCommitDownload = true;
+            }
+            else
+            {
+                if (!this.TryDownloadCommit(
+                    commitId,
+                    enlistment,
+                    objectRequestor,
+                    gitObjects,
+                    gitRepo,
+                    out errorMessage))
+                {
+                    return new Result(errorMessage);
+                }
             }
 
             if (!GVFSVerb.TrySetRequiredGitConfigSettings(enlistment) ||
@@ -643,6 +681,24 @@ namespace GVFS.CommandLine
             GitProcess git = new GitProcess(enlistment);
             string originBranchName = "origin/" + branch;
             GitProcess.Result createBranchResult = git.CreateBranchWithUpstream(branch, originBranchName);
+            if (createBranchResult.ExitCodeIsFailure && skippedCommitDownload)
+            {
+                tracer.RelatedInfo("Branch creation failed after deferring commit download, downloading commit now");
+                if (!this.TryDownloadCommit(
+                    commitId,
+                    enlistment,
+                    objectRequestor,
+                    gitObjects,
+                    gitRepo,
+                    out errorMessage))
+                {
+                    return new Result(errorMessage);
+                }
+
+                skippedCommitDownload = false;
+                createBranchResult = git.CreateBranchWithUpstream(branch, originBranchName);
+            }
+
             if (createBranchResult.ExitCodeIsFailure)
             {
                 return new Result("Unable to create branch '" + originBranchName + "': " + createBranchResult.Errors + "\r\n" + createBranchResult.Output);
@@ -654,7 +710,31 @@ namespace GVFS.CommandLine
 
             if (!this.TryDownloadRootGitAttributes(enlistment, gitObjects, gitRepo, out errorMessage))
             {
-                return new Result(errorMessage);
+                if (skippedCommitDownload)
+                {
+                    tracer.RelatedInfo("Root .gitattributes download failed after deferring commit download, downloading commit now");
+                    if (!this.TryDownloadCommit(
+                        commitId,
+                        enlistment,
+                        objectRequestor,
+                        gitObjects,
+                        gitRepo,
+                        out errorMessage))
+                    {
+                        return new Result(errorMessage);
+                    }
+
+                    skippedCommitDownload = false;
+
+                    if (!this.TryDownloadRootGitAttributes(enlistment, gitObjects, gitRepo, out errorMessage))
+                    {
+                        return new Result(errorMessage);
+                    }
+                }
+                else
+                {
+                    return new Result(errorMessage);
+                }
             }
 
             this.CreateGitScript(enlistment);
@@ -677,7 +757,7 @@ namespace GVFS.CommandLine
                 // again and retry the checkout.
 
                 if (!this.TryDownloadCommit(
-                    refs.GetTipCommitId(branch),
+                    commitId,
                     enlistment,
                     objectRequestor,
                     gitObjects,
