@@ -206,7 +206,7 @@ namespace GVFS.CommandLine
                         {
                             Console.WriteLine("All requested files are already available. Nothing new to prefetch.");
                         }
-                        else
+                        else if (!this.TryPrefetchBlobsViaMountProcess(tracer, enlistment, filesList, foldersList, headCommitId))
                         {
                             GitObjectsHttpRequestor objectRequestor;
                             CacheServerInfo resolvedCacheServer;
@@ -359,6 +359,85 @@ namespace GVFS.CommandLine
                     default:
                         // Older mount that doesn't recognize PrefetchCommits
                         tracer.RelatedInfo("TryPrefetchCommitsViaMountProcess: Unexpected response '{0}', falling back to direct prefetch", response.Header);
+                        return false;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Attempts to offload the blob prefetch to a running mount process,
+        /// which already has warm authentication. Returns true if the mount
+        /// handled the request (success or failure); returns false if offload
+        /// is unavailable and the caller should fall back to direct auth.
+        /// </summary>
+        private bool TryPrefetchBlobsViaMountProcess(
+            ITracer tracer,
+            GVFSEnlistment enlistment,
+            List<string> filesList,
+            List<string> foldersList,
+            string headCommitId)
+        {
+            using (NamedPipeClient pipeClient = new NamedPipeClient(enlistment.NamedPipeName))
+            {
+                if (!pipeClient.Connect())
+                {
+                    tracer.RelatedInfo("TryPrefetchBlobsViaMountProcess: Mount not running, falling back to direct prefetch");
+                    return false;
+                }
+
+                NamedPipeMessages.PrefetchBlobs.Request request = new NamedPipeMessages.PrefetchBlobs.Request
+                {
+                    Files = filesList,
+                    Folders = foldersList,
+                    HeadCommitId = headCommitId,
+                    HydrateFiles = this.HydrateFiles,
+                };
+
+                if (!pipeClient.TrySendRequest(request.CreateMessage()))
+                {
+                    tracer.RelatedWarning("TryPrefetchBlobsViaMountProcess: Failed to send request, falling back to direct prefetch");
+                    return false;
+                }
+
+                NamedPipeMessages.Message response;
+                if (!pipeClient.TryReadResponse(out response))
+                {
+                    tracer.RelatedWarning("TryPrefetchBlobsViaMountProcess: Failed to read response, falling back to direct prefetch");
+                    return false;
+                }
+
+                switch (response.Header)
+                {
+                    case NamedPipeMessages.PrefetchBlobs.CompleteResult:
+                        NamedPipeMessages.PrefetchBlobs.Response blobResponse =
+                            NamedPipeMessages.PrefetchBlobs.Response.FromMessage(response);
+
+                        if (blobResponse.Success)
+                        {
+                            tracer.RelatedInfo("TryPrefetchBlobsViaMountProcess: Mount completed blob prefetch successfully");
+
+                            Console.WriteLine();
+                            Console.WriteLine("Stats:");
+                            Console.WriteLine("  Matched blobs:    " + blobResponse.MatchedBlobCount);
+                            Console.WriteLine("  Already cached:   " + (blobResponse.MatchedBlobCount - blobResponse.DownloadedBlobCount));
+                            Console.WriteLine("  Downloaded:       " + blobResponse.DownloadedBlobCount);
+                            if (this.HydrateFiles)
+                            {
+                                Console.WriteLine("  Hydrated files:   " + blobResponse.HydratedFileCount);
+                            }
+
+                            return true;
+                        }
+
+                        this.ReportErrorAndExit(tracer, "Prefetching blobs failed (via mount): " + blobResponse.Error);
+                        return true;
+
+                    case NamedPipeMessages.PrefetchBlobs.MountNotReadyResult:
+                        tracer.RelatedInfo("TryPrefetchBlobsViaMountProcess: Mount not ready, falling back to direct prefetch");
+                        return false;
+
+                    default:
+                        tracer.RelatedInfo("TryPrefetchBlobsViaMountProcess: Unexpected response '{0}', falling back to direct prefetch", response.Header);
                         return false;
                 }
             }
