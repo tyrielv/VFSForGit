@@ -313,6 +313,29 @@ namespace GVFS.Common.NamedPipes
             }
         }
 
+        public static class PrefetchCommits
+        {
+            public const string Request = "PrefetchCommits";
+            public const string CompleteResult = "PrefetchCommitsComplete";
+            public const string MountNotReadyResult = "MountNotReady";
+
+            public class Response
+            {
+                public bool Success { get; set; }
+                public string Error { get; set; }
+
+                public static Response FromMessage(Message message)
+                {
+                    return GVFSJsonOptions.Deserialize<Response>(message.Body);
+                }
+
+                public Message CreateMessage()
+                {
+                    return new Message(CompleteResult, GVFSJsonOptions.Serialize(this));
+                }
+            }
+        }
+
         public static class Notification
         {
             public class Request

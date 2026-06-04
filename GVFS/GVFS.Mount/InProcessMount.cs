@@ -516,6 +516,10 @@ namespace GVFS.Mount
                     this.HandleDehydrateFolders(message, connection);
                     break;
 
+                case NamedPipeMessages.PrefetchCommits.Request:
+                    this.HandlePrefetchCommitsRequest(connection);
+                    break;
+
                 case NamedPipeMessages.HydrationStatus.Request:
                     this.HandleGetHydrationStatusRequest(connection);
                     break;
@@ -988,6 +992,53 @@ namespace GVFS.Mount
             else
             {
                 response = new NamedPipeMessages.RunPostFetchJob.Response(NamedPipeMessages.RunPostFetchJob.MountNotReadyResult);
+            }
+
+            connection.TrySendResponse(response.CreateMessage());
+        }
+
+        private void HandlePrefetchCommitsRequest(NamedPipeServer.Connection connection)
+        {
+            this.tracer.RelatedInfo("Received prefetch commits request");
+
+            if (this.currentState != MountState.Ready)
+            {
+                connection.TrySendResponse(
+                    new NamedPipeMessages.Message(NamedPipeMessages.PrefetchCommits.MountNotReadyResult, null));
+                return;
+            }
+
+            NamedPipeMessages.PrefetchCommits.Response response;
+            try
+            {
+                // Use a callback to enqueue the post-fetch step directly on the
+                // maintenance scheduler, avoiding a re-entrant named pipe call.
+                PrefetchStep prefetchStep = new PrefetchStep(
+                    this.context,
+                    this.gitObjects,
+                    requireCacheLock: false,
+                    postFetchCallback: packIndexes =>
+                    {
+                        this.maintenanceScheduler.EnqueueOneTimeStep(new PostFetchStep(this.context, packIndexes));
+                    });
+
+                string error;
+                bool success = prefetchStep.TryPrefetchCommitsAndTrees(out error);
+
+                response = new NamedPipeMessages.PrefetchCommits.Response
+                {
+                    Success = success,
+                    Error = error,
+                };
+            }
+            catch (Exception e)
+            {
+                this.tracer.RelatedError("HandlePrefetchCommitsRequest: Exception: {0}", e.ToString());
+                response = new NamedPipeMessages.PrefetchCommits.Response
+                {
+                    Success = false,
+                    Error = e.Message,
+                };
             }
 
             connection.TrySendResponse(response.CreateMessage());

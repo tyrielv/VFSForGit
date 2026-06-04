@@ -3,6 +3,7 @@ using GVFS.Common.FileSystem;
 using GVFS.Common.Git;
 using GVFS.Common.Http;
 using GVFS.Common.Maintenance;
+using GVFS.Common.NamedPipes;
 using GVFS.Common.Prefetch;
 using GVFS.Common.Tracing;
 using System;
@@ -172,15 +173,25 @@ namespace GVFS.CommandLine
                             this.ReportErrorAndExit(tracer, "You can only specify --hydrate with --files or --folders");
                         }
 
-                        GitObjectsHttpRequestor objectRequestor;
-                        CacheServerInfo resolvedCacheServer;
-                        this.InitializeServerConnection(
-                            tracer,
-                            enlistment,
-                            cacheServerFromConfig,
-                            out objectRequestor,
-                            out resolvedCacheServer);
-                        this.PrefetchCommits(tracer, enlistment, objectRequestor, resolvedCacheServer);
+                        // Try offload silently — if mount isn't available this returns
+                        // false quickly and we fall through to the direct-auth path which
+                        // has its own spinner. We don't wrap this in ShowStatusWhileRunning
+                        // because a false return (mount unavailable) would print "Failed"
+                        // to the console, which is misleading for an expected fallback.
+                        bool offloadSucceeded = this.TryPrefetchCommitsViaMountProcess(tracer, enlistment);
+
+                        if (!offloadSucceeded)
+                        {
+                            GitObjectsHttpRequestor objectRequestor;
+                            CacheServerInfo resolvedCacheServer;
+                            this.InitializeServerConnection(
+                                tracer,
+                                enlistment,
+                                cacheServerFromConfig,
+                                out objectRequestor,
+                                out resolvedCacheServer);
+                            this.PrefetchCommits(tracer, enlistment, objectRequestor, resolvedCacheServer);
+                        }
                     }
                     else
                     {
@@ -294,6 +305,63 @@ namespace GVFS.CommandLine
 
             this.InitializeLocalCacheAndObjectsPaths(tracer, enlistment, retryConfig, serverGVFSConfig, resolvedCacheServer);
             objectRequestor = new GitObjectsHttpRequestor(tracer, enlistment, resolvedCacheServer, retryConfig);
+        }
+
+        /// <summary>
+        /// Attempts to offload the commit prefetch to a running mount process,
+        /// which already has warm authentication. Returns true if the mount
+        /// handled the request (success or failure); returns false if offload
+        /// is unavailable and the caller should fall back to direct auth.
+        /// </summary>
+        private bool TryPrefetchCommitsViaMountProcess(ITracer tracer, GVFSEnlistment enlistment)
+        {
+            using (NamedPipeClient pipeClient = new NamedPipeClient(enlistment.NamedPipeName))
+            {
+                if (!pipeClient.Connect())
+                {
+                    tracer.RelatedInfo("TryPrefetchCommitsViaMountProcess: Mount not running, falling back to direct prefetch");
+                    return false;
+                }
+
+                NamedPipeMessages.Message request = new NamedPipeMessages.Message(NamedPipeMessages.PrefetchCommits.Request, null);
+                if (!pipeClient.TrySendRequest(request))
+                {
+                    tracer.RelatedWarning("TryPrefetchCommitsViaMountProcess: Failed to send request, falling back to direct prefetch");
+                    return false;
+                }
+
+                NamedPipeMessages.Message response;
+                if (!pipeClient.TryReadResponse(out response))
+                {
+                    tracer.RelatedWarning("TryPrefetchCommitsViaMountProcess: Failed to read response, falling back to direct prefetch");
+                    return false;
+                }
+
+                switch (response.Header)
+                {
+                    case NamedPipeMessages.PrefetchCommits.CompleteResult:
+                        NamedPipeMessages.PrefetchCommits.Response prefetchResponse =
+                            NamedPipeMessages.PrefetchCommits.Response.FromMessage(response);
+
+                        if (prefetchResponse.Success)
+                        {
+                            tracer.RelatedInfo("TryPrefetchCommitsViaMountProcess: Mount completed prefetch successfully");
+                            return true;
+                        }
+
+                        this.ReportErrorAndExit(tracer, "Prefetching commits and trees failed (via mount): " + prefetchResponse.Error);
+                        return true;
+
+                    case NamedPipeMessages.PrefetchCommits.MountNotReadyResult:
+                        tracer.RelatedInfo("TryPrefetchCommitsViaMountProcess: Mount not ready, falling back to direct prefetch");
+                        return false;
+
+                    default:
+                        // Older mount that doesn't recognize PrefetchCommits
+                        tracer.RelatedInfo("TryPrefetchCommitsViaMountProcess: Unexpected response '{0}', falling back to direct prefetch", response.Header);
+                        return false;
+                }
+            }
         }
 
         private void PrefetchCommits(ITracer tracer, GVFSEnlistment enlistment, GitObjectsHttpRequestor objectRequestor, CacheServerInfo cacheServer)
