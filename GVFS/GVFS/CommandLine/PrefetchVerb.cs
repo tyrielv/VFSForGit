@@ -9,6 +9,9 @@ using GVFS.Common.Tracing;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace GVFS.CommandLine
 {
@@ -206,7 +209,32 @@ namespace GVFS.CommandLine
                         {
                             Console.WriteLine("All requested files are already available. Nothing new to prefetch.");
                         }
-                        else if (this.HydrateFiles || !this.TryPrefetchBlobsViaMountProcess(tracer, enlistment, filesList, foldersList, headCommitId))
+                        else if (this.HydrateFiles)
+                        {
+                            // For --hydrate, try offloading the download phase to the mount
+                            // (without hydration), then hydrate locally in the verb process.
+                            // This avoids the mount process writing to ProjFS-virtualized files
+                            // (self-callback risk) while still benefiting from warm auth.
+                            if (!this.TryPrefetchBlobsViaMountProcess(tracer, enlistment, filesList, foldersList, headCommitId))
+                            {
+                                // Mount unavailable — fall back to direct auth for download
+                                GitObjectsHttpRequestor objectRequestor;
+                                CacheServerInfo resolvedCacheServer;
+                                this.InitializeServerConnection(
+                                    tracer,
+                                    enlistment,
+                                    cacheServerFromConfig,
+                                    out objectRequestor,
+                                    out resolvedCacheServer);
+                                this.PrefetchBlobs(tracer, enlistment, headCommitId, filesList, foldersList, lastPrefetchArgs, objectRequestor, resolvedCacheServer);
+                            }
+                            else
+                            {
+                                // Mount handled download — now hydrate locally
+                                this.HydrateMatchingFiles(tracer, enlistment, filesList, foldersList);
+                            }
+                        }
+                        else if (!this.TryPrefetchBlobsViaMountProcess(tracer, enlistment, filesList, foldersList, headCommitId))
                         {
                             GitObjectsHttpRequestor objectRequestor;
                             CacheServerInfo resolvedCacheServer;
@@ -633,6 +661,102 @@ namespace GVFS.CommandLine
             }
 
             return "from origin (no cache server)";
+        }
+
+        /// <summary>
+        /// Hydrates files matching the file/folder filters by reading 1 byte from each.
+        /// Runs in the verb process (not the mount) to avoid ProjFS self-callbacks.
+        /// Blobs should already be in the object cache from a prior download phase.
+        /// </summary>
+        private void HydrateMatchingFiles(
+            ITracer tracer,
+            GVFSEnlistment enlistment,
+            List<string> filesList,
+            List<string> foldersList)
+        {
+            string workingDir = enlistment.WorkingDirectoryRoot;
+            List<string> filesToHydrate = new List<string>();
+
+            // Collect files from folder filters
+            foreach (string folder in foldersList)
+            {
+                string normalizedFolder = folder.Replace(GVFSConstants.GitPathSeparator, Path.DirectorySeparatorChar).TrimEnd(Path.DirectorySeparatorChar);
+                string fullFolderPath = Path.Combine(workingDir, normalizedFolder);
+                if (Directory.Exists(fullFolderPath))
+                {
+                    filesToHydrate.AddRange(Directory.EnumerateFiles(fullFolderPath, "*", SearchOption.AllDirectories));
+                }
+            }
+
+            // Collect files from file filters (supports simple prefix wildcards like *.txt)
+            foreach (string filePattern in filesList)
+            {
+                string normalizedPattern = filePattern.Replace(GVFSConstants.GitPathSeparator, Path.DirectorySeparatorChar);
+
+                if (normalizedPattern.StartsWith("*"))
+                {
+                    // Prefix wildcard — search entire working directory
+                    filesToHydrate.AddRange(Directory.EnumerateFiles(workingDir, normalizedPattern, SearchOption.AllDirectories));
+                }
+                else
+                {
+                    // Exact file path
+                    string fullPath = Path.Combine(workingDir, normalizedPattern);
+                    if (File.Exists(fullPath))
+                    {
+                        filesToHydrate.Add(fullPath);
+                    }
+                }
+            }
+
+            if (filesToHydrate.Count == 0)
+            {
+                tracer.RelatedInfo("HydrateMatchingFiles: No files to hydrate");
+                return;
+            }
+
+            int hydratedCount = 0;
+            int failedCount = 0;
+            int maxParallelism = Math.Max(1, Environment.ProcessorCount / 2);
+
+            bool success = true;
+            Func<bool> doHydrate = () =>
+            {
+                Parallel.ForEach(
+                    filesToHydrate,
+                    new ParallelOptions { MaxDegreeOfParallelism = maxParallelism },
+                    filePath =>
+                    {
+                        if (GVFSPlatform.Instance.FileSystem.HydrateFile(filePath, new byte[1]))
+                        {
+                            Interlocked.Increment(ref hydratedCount);
+                        }
+                        else
+                        {
+                            tracer.RelatedWarning("HydrateMatchingFiles: Failed to hydrate " + filePath);
+                            Interlocked.Increment(ref failedCount);
+                        }
+                    });
+
+                return failedCount == 0;
+            };
+
+            if (this.Verbose)
+            {
+                success = doHydrate();
+            }
+            else
+            {
+                success = this.ShowStatusWhileRunning(doHydrate, "Hydrating files");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("  Hydrated files:   " + hydratedCount);
+            if (failedCount > 0)
+            {
+                Console.WriteLine("  Failed to hydrate: " + failedCount);
+                Environment.ExitCode = 1;
+            }
         }
     }
 }
