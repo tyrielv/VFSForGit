@@ -206,7 +206,7 @@ namespace GVFS.CommandLine
                         {
                             Console.WriteLine("All requested files are already available. Nothing new to prefetch.");
                         }
-                        else if (!this.TryPrefetchBlobsViaMountProcess(tracer, enlistment, filesList, foldersList, headCommitId))
+                        else if (this.HydrateFiles || !this.TryPrefetchBlobsViaMountProcess(tracer, enlistment, filesList, foldersList, headCommitId))
                         {
                             GitObjectsHttpRequestor objectRequestor;
                             CacheServerInfo resolvedCacheServer;
