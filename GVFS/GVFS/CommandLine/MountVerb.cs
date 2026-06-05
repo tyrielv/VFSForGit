@@ -284,22 +284,34 @@ namespace GVFS.CommandLine
         {
             errorMessage = string.Empty;
 
-            NamedPipeMessages.RegisterRepoRequest request = new NamedPipeMessages.RegisterRepoRequest();
-
             // Worktree mounts register with their worktree path so they can be
             // listed and unregistered independently of the primary enlistment.
-            request.EnlistmentRoot = enlistment.IsWorktree
+            string registrationRoot = enlistment.IsWorktree
                 ? enlistment.WorkingDirectoryRoot
                 : enlistment.PrimaryEnlistmentRoot;
+            string ownerSID = GVFSPlatform.Instance.GetCurrentUser();
 
-            request.OwnerSID = GVFSPlatform.Instance.GetCurrentUser();
+            NamedPipeMessages.RegisterRepoRequest request = new NamedPipeMessages.RegisterRepoRequest();
+            request.EnlistmentRoot = registrationRoot;
+            request.OwnerSID = ownerSID;
 
             using (NamedPipeClient client = new NamedPipeClient(this.ServicePipeName))
             {
                 if (!client.Connect())
                 {
-                    errorMessage = "Unable to register repo because GVFS.Service is not responding.";
-                    return false;
+                    // User-level install model: no GVFS.Service is running.
+                    // Write directly to the per-user repo registry file
+                    // (same on-disk format the service would have written).
+                    try
+                    {
+                        LocalRepoRegistry.Register(registrationRoot, ownerSID);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        errorMessage = "Unable to register repo locally: " + ex.Message;
+                        return false;
+                    }
                 }
 
                 try

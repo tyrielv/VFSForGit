@@ -156,8 +156,18 @@ namespace GVFS.CommandLine
             {
                 if (!client.Connect())
                 {
-                    errorMessage = "GVFS.Service is not responding.";
-                    return false;
+                    // User-level install model: no GVFS.Service running.
+                    // Read the per-user registry file directly.
+                    try
+                    {
+                        repoList = LocalRepoRegistry.GetActiveRepoPaths();
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        errorMessage = "Unable to read repo registry locally: " + ex.Message;
+                        return false;
+                    }
                 }
 
                 try

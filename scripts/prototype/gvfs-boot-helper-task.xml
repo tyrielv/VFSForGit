@@ -1,0 +1,73 @@
+﻿<?xml version="1.0" encoding="UTF-16"?>
+<!--
+gvfs-boot-helper-task.xml
+
+Scheduled task definition for the user-level GVFS install model.
+
+Registered once at install time (Register-ScheduledTask, requires
+admin). Once registered, runs as LocalSystem with no further UAC.
+
+Two triggers:
+  1. BootTrigger - fires at OS startup. Re-attaches prjflt to every
+     NTFS/ReFS volume after reboot (FilterAttach is not persistent).
+  2. EventTrigger - subscribes to the Microsoft-Windows-Partition
+     Diagnostic event log, Event ID 1006 (partition online). This
+     event fires when a new partition becomes available, including
+     USB plug-in, VHD mount, and new partition creation. The trigger
+     extracts the drive letter from the event and passes it to the
+     helper as -DriveLetter so we only process the new volume.
+
+The Microsoft-Windows-Partition channel is enabled by default on
+Windows 10+ and fires reliably for both fixed and removable media.
+
+This task does NOT have a version - it is replaced only when its
+contents change. New GVFS installs/upgrades do NOT need to touch
+this task or the helper script (no UAC needed for per-user upgrades).
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>Microsoft\GVFS</Author>
+    <Description>Re-attaches the ProjFS filter (prjflt) to NTFS/ReFS volumes after reboot or volume mount. Required by VFS for Git. [gvfs-task-hash=__TASK_HASH__]</Description>
+    <URI>\GVFS\BootHelper</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+    <EventTrigger>
+      <Enabled>true</Enabled>
+      <Subscription>&lt;QueryList&gt;&lt;Query Id="0" Path="Microsoft-Windows-Partition/Diagnostic"&gt;&lt;Select Path="Microsoft-Windows-Partition/Diagnostic"&gt;*[System[Provider[@Name='Microsoft-Windows-Partition'] and (EventID=1006)]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;</Subscription>
+    </EventTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+    <Priority>5</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>powershell.exe</Command>
+      <Arguments>-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Program Files\GVFS\bin\gvfs-boot-helper.ps1"</Arguments>
+    </Exec>
+  </Actions>
+</Task>

@@ -204,8 +204,19 @@ namespace GVFS.CommandLine
             {
                 if (!client.Connect())
                 {
-                    errorMessage = "Unable to unregister repo because GVFS.Service is not responding. " + GVFSVerb.StartServiceInstructions;
-                    return false;
+                    // User-level install model: no GVFS.Service running.
+                    // Mark the entry inactive in the per-user registry file
+                    // directly (same semantics as RepoRegistry.TryDeactivateRepo).
+                    try
+                    {
+                        LocalRepoRegistry.Unregister(rootPath);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        errorMessage = "Unable to unregister repo locally: " + ex.Message;
+                        return false;
+                    }
                 }
 
                 try

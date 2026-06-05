@@ -552,8 +552,14 @@ You can specify a URL, a name of a configured cache server, or the special names
             {
                 if (!client.Connect())
                 {
-                    errorMessage = "GVFS.Service is not responding. " + GVFSVerb.StartServiceInstructions;
-                    return false;
+                    // User-level install model: no GVFS.Service running.
+                    // The boot-time scheduled task (GVFS\BootHelper) is
+                    // responsible for keeping PrjFlt enabled and attached
+                    // to all NTFS/ReFS volumes, including freshly-mounted
+                    // ones via its volume-mount event trigger. From the
+                    // CLI's perspective, the attach is already taken care
+                    // of - return success.
+                    return true;
                 }
 
                 try
