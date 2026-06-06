@@ -159,10 +159,12 @@ namespace GVFS.Common.Tracing
             {
                 try
                 {
-                    var metadata = Newtonsoft.Json.JsonConvert.DeserializeObject<EventMetadata>(message.Payload);
-                    if (metadata != null && metadata.ContainsKey("DurationMs"))
+                    using (var doc = System.Text.Json.JsonDocument.Parse(message.Payload))
                     {
-                        durationSec = Convert.ToDouble(metadata["DurationMs"]) / 1000.0;
+                        if (doc.RootElement.TryGetProperty("DurationMs", out System.Text.Json.JsonElement durationElement))
+                        {
+                            durationSec = durationElement.GetDouble() / 1000.0;
+                        }
                     }
                 }
                 catch
@@ -212,10 +214,12 @@ namespace GVFS.Common.Tracing
 
             try
             {
-                var dict = Newtonsoft.Json.JsonConvert.DeserializeObject<System.Collections.Generic.Dictionary<string, object>>(jsonPayload);
-                if (dict != null && dict.TryGetValue(key, out object value) && value != null)
+                using (var doc = System.Text.Json.JsonDocument.Parse(jsonPayload))
                 {
-                    return value.ToString();
+                    if (doc.RootElement.TryGetProperty(key, out System.Text.Json.JsonElement element) && element.ValueKind != System.Text.Json.JsonValueKind.Null)
+                    {
+                        return element.ToString();
+                    }
                 }
             }
             catch

@@ -3,7 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
-using Newtonsoft.Json;
+using System.Text.Json;
 
 namespace GVFS.Common.Tracing
 {
@@ -114,8 +114,7 @@ namespace GVFS.Common.Tracing
             this.nestingDepth++;
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("region_enter");
+                jw.WriteString("event", "region_enter");
                 this.WriteCommonFields(jw);
                 WriteOptionalInt(jw, "repo", 1);
                 WriteOptionalInt(jw, "nesting", this.nestingDepth);
@@ -129,12 +128,10 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("region_leave");
+                jw.WriteString("event", "region_leave");
                 this.WriteCommonFields(jw);
                 WriteOptionalInt(jw, "repo", 1);
-                jw.WritePropertyName("t_rel");
-                jw.WriteValue(Math.Round(elapsedSeconds, 6));
+                jw.WriteNumber("t_rel", Math.Round(elapsedSeconds, 6));
                 WriteOptionalInt(jw, "nesting", this.nestingDepth);
                 WriteOptionalString(jw, "category", category);
                 WriteOptionalString(jw, "label", label);
@@ -146,14 +143,11 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("data");
+                jw.WriteString("event", "data");
                 this.WriteCommonFields(jw);
                 WriteOptionalInt(jw, "repo", 1);
-                jw.WritePropertyName("t_abs");
-                jw.WriteValue(Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
-                jw.WritePropertyName("t_rel");
-                jw.WriteValue(Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
+                jw.WriteNumber("t_abs", Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
+                jw.WriteNumber("t_rel", Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
                 WriteOptionalInt(jw, "nesting", this.nestingDepth);
                 WriteOptionalString(jw, "category", category);
                 WriteOptionalString(jw, "key", key);
@@ -165,19 +159,16 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("data_json");
+                jw.WriteString("event", "data_json");
                 this.WriteCommonFields(jw);
                 WriteOptionalInt(jw, "repo", 1);
-                jw.WritePropertyName("t_abs");
-                jw.WriteValue(Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
-                jw.WritePropertyName("t_rel");
-                jw.WriteValue(Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
+                jw.WriteNumber("t_abs", Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
+                jw.WriteNumber("t_rel", Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
                 WriteOptionalInt(jw, "nesting", this.nestingDepth);
                 WriteOptionalString(jw, "category", category);
                 WriteOptionalString(jw, "key", key);
                 jw.WritePropertyName("value");
-                jw.WriteRawValue(JsonConvert.SerializeObject(value));
+                jw.WriteRawValue(JsonSerializer.Serialize(value));
             });
         }
 
@@ -185,8 +176,7 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("error");
+                jw.WriteString("event", "error");
                 this.WriteCommonFields(jw);
                 WriteOptionalString(jw, "msg", message);
                 WriteOptionalString(jw, "fmt", message);
@@ -208,24 +198,18 @@ namespace GVFS.Common.Tracing
 
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("exit");
+                jw.WriteString("event", "exit");
                 this.WriteCommonFields(jw);
-                jw.WritePropertyName("t_abs");
-                jw.WriteValue(Math.Round(totalSeconds, 6));
-                jw.WritePropertyName("code");
-                jw.WriteValue(exitCode);
+                jw.WriteNumber("t_abs", Math.Round(totalSeconds, 6));
+                jw.WriteNumber("code", exitCode);
             });
 
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("atexit");
+                jw.WriteString("event", "atexit");
                 this.WriteCommonFields(jw);
-                jw.WritePropertyName("t_abs");
-                jw.WriteValue(Math.Round(totalSeconds, 6));
-                jw.WritePropertyName("code");
-                jw.WriteValue(exitCode);
+                jw.WriteNumber("t_abs", Math.Round(totalSeconds, 6));
+                jw.WriteNumber("code", exitCode);
             });
 
             this.CloseConnection();
@@ -243,13 +227,10 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("version");
+                jw.WriteString("event", "version");
                 this.WriteCommonFields(jw);
-                jw.WritePropertyName("evt");
-                jw.WriteValue(EventFormatVersion);
-                jw.WritePropertyName("exe");
-                jw.WriteValue(this.exeVersion);
+                jw.WriteString("evt", EventFormatVersion);
+                jw.WriteString("exe", this.exeVersion);
             });
         }
 
@@ -257,18 +238,16 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("start");
+                jw.WriteString("event", "start");
                 this.WriteCommonFields(jw);
-                jw.WritePropertyName("t_abs");
-                jw.WriteValue(Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
+                jw.WriteNumber("t_abs", Math.Round(this.elapsed.Elapsed.TotalSeconds, 6));
                 jw.WritePropertyName("argv");
                 jw.WriteStartArray();
                 if (argv != null)
                 {
                     foreach (string arg in argv)
                     {
-                        jw.WriteValue(arg);
+                        jw.WriteStringValue(arg);
                     }
                 }
 
@@ -280,8 +259,7 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("cmd_name");
+                jw.WriteString("event", "cmd_name");
                 this.WriteCommonFields(jw);
                 WriteOptionalString(jw, "name", name);
                 WriteOptionalString(jw, "hierarchy", hierarchy);
@@ -292,8 +270,7 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("cmd_mode");
+                jw.WriteString("event", "cmd_mode");
                 this.WriteCommonFields(jw);
                 WriteOptionalString(jw, "name", mode);
             });
@@ -303,8 +280,7 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("def_param");
+                jw.WriteString("event", "def_param");
                 this.WriteCommonFields(jw);
                 WriteOptionalString(jw, "scope", "local");
                 WriteOptionalString(jw, "param", param);
@@ -316,25 +292,21 @@ namespace GVFS.Common.Tracing
         {
             this.WriteJson(jw =>
             {
-                jw.WritePropertyName("event");
-                jw.WriteValue("def_repo");
+                jw.WriteString("event", "def_repo");
                 this.WriteCommonFields(jw);
                 WriteOptionalInt(jw, "repo", 1);
                 WriteOptionalString(jw, "worktree", worktree);
             });
         }
 
-        private void WriteCommonFields(JsonTextWriter jw)
+        private void WriteCommonFields(Utf8JsonWriter jw)
         {
-            jw.WritePropertyName("sid");
-            jw.WriteValue(this.sid);
-            jw.WritePropertyName("thread");
-            jw.WriteValue(System.Threading.Thread.CurrentThread.Name ?? "main");
-            jw.WritePropertyName("time");
-            jw.WriteValue(DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"));
+            jw.WriteString("sid", this.sid);
+            jw.WriteString("thread", System.Threading.Thread.CurrentThread.Name ?? "main");
+            jw.WriteString("time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.ffffffZ"));
         }
 
-        private void WriteJson(Action<JsonTextWriter> writeContent)
+        private void WriteJson(Action<Utf8JsonWriter> writeContent)
         {
             if (this.disposed || this.writer == null)
             {
@@ -343,17 +315,17 @@ namespace GVFS.Common.Tracing
 
             try
             {
-                StringBuilder sb = new StringBuilder(256);
-                using (StringWriter sw = new StringWriter(sb))
-                using (JsonTextWriter jw = new JsonTextWriter(sw))
+                using (MemoryStream ms = new MemoryStream(256))
                 {
-                    jw.Formatting = Formatting.None;
-                    jw.WriteStartObject();
-                    writeContent(jw);
-                    jw.WriteEndObject();
-                }
+                    using (Utf8JsonWriter jw = new Utf8JsonWriter(ms))
+                    {
+                        jw.WriteStartObject();
+                        writeContent(jw);
+                        jw.WriteEndObject();
+                    }
 
-                this.writer.WriteLine(sb.ToString());
+                    this.writer.WriteLine(Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length));
+                }
             }
             catch (Exception)
             {
@@ -385,19 +357,17 @@ namespace GVFS.Common.Tracing
             this.pipe = null;
         }
 
-        private static void WriteOptionalString(JsonTextWriter jw, string key, string value)
+        private static void WriteOptionalString(Utf8JsonWriter jw, string key, string value)
         {
             if (value != null)
             {
-                jw.WritePropertyName(key);
-                jw.WriteValue(value);
+                jw.WriteString(key, value);
             }
         }
 
-        private static void WriteOptionalInt(JsonTextWriter jw, string key, int value)
+        private static void WriteOptionalInt(Utf8JsonWriter jw, string key, int value)
         {
-            jw.WritePropertyName(key);
-            jw.WriteValue(value);
+            jw.WriteNumber(key, value);
         }
     }
 }

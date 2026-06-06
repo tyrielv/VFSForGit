@@ -4,7 +4,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using GVFS.Common.Tracing;
 using GVFS.Tests.Should;
-using Newtonsoft.Json;
 using NUnit.Framework;
 
 namespace GVFS.UnitTests.Tracing
