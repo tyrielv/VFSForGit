@@ -139,7 +139,8 @@ namespace GVFS.Mount
 
                 if (!this.enlistment.Authentication.TryInitializeAndQueryGVFSConfig(
                     this.tracer, this.enlistment, this.retryConfig,
-                    out config, out authConfigError, out isAuthFailure))
+                    out config, out authConfigError, out isAuthFailure,
+                    updateProgress: message => this.mountProgressMessage = message))
                 {
                     if (this.cacheServer != null && !string.IsNullOrWhiteSpace(this.cacheServer.Url))
                     {

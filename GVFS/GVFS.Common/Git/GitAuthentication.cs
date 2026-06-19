@@ -219,7 +219,8 @@ namespace GVFS.Common.Git
             RetryConfig retryConfig,
             out ServerGVFSConfig serverGVFSConfig,
             out string errorMessage,
-            out bool isAuthFailure)
+            out bool isAuthFailure,
+            Action<string> updateProgress = null)
         {
             if (this.isInitialized)
             {
@@ -236,7 +237,7 @@ namespace GVFS.Common.Git
 
                 // First attempt without credentials. If anonymous access works,
                 // we get the config in a single request.
-                if (configRequestor.TryQueryGVFSConfig(false, out serverGVFSConfig, out httpStatus, out _))
+                if (configRequestor.TryQueryGVFSConfig(false, out serverGVFSConfig, out httpStatus, out _, updateProgress))
                 {
                     this.IsAnonymous = true;
                     this.isInitialized = true;
@@ -253,10 +254,12 @@ namespace GVFS.Common.Git
 
                 // Server requires authentication — fetch credentials
                 this.IsAnonymous = false;
+                updateProgress?.Invoke("Fetching credentials");
 
                 if (!this.TryCallGitCredential(tracer, out errorMessage))
                 {
                     isAuthFailure = true;
+                    updateProgress?.Invoke("Credential fetch failed: " + errorMessage);
                     tracer.RelatedWarning("{0}: Credential fetch failed: {1}", nameof(this.TryInitializeAndQueryGVFSConfig), errorMessage);
                     return false;
                 }
@@ -265,7 +268,7 @@ namespace GVFS.Common.Git
 
                 // Retry with credentials using the same ConfigHttpRequestor (reuses HttpClient/connection)
                 HttpStatusCode? retryHttpStatus;
-                if (configRequestor.TryQueryGVFSConfig(true, out serverGVFSConfig, out retryHttpStatus, out errorMessage))
+                if (configRequestor.TryQueryGVFSConfig(true, out serverGVFSConfig, out retryHttpStatus, out errorMessage, updateProgress))
                 {
                     tracer.RelatedInfo("{0}: Config obtained with credentials", nameof(this.TryInitializeAndQueryGVFSConfig));
                     return true;

@@ -17,7 +17,7 @@ namespace GVFS.Common.Http
             this.repoUrl = enlistment.RepoUrl;
         }
 
-        public bool TryQueryGVFSConfig(bool logErrors, out ServerGVFSConfig serverGVFSConfig, out HttpStatusCode? httpStatus, out string errorMessage)
+        public bool TryQueryGVFSConfig(bool logErrors, out ServerGVFSConfig serverGVFSConfig, out HttpStatusCode? httpStatus, out string errorMessage, Action<string> updateProgress = null)
         {
             serverGVFSConfig = null;
             httpStatus = null;
@@ -41,11 +41,31 @@ namespace GVFS.Common.Http
             }
 
             long requestId = HttpRequestor.GetNewRequestId();
-            RetryWrapper<ServerGVFSConfig> retrier = new RetryWrapper<ServerGVFSConfig>(this.RetryConfig.MaxAttempts, CancellationToken.None);
+            int maxAttempts = this.RetryConfig.MaxAttempts;
+            RetryWrapper<ServerGVFSConfig> retrier = new RetryWrapper<ServerGVFSConfig>(maxAttempts, CancellationToken.None);
 
             if (logErrors)
             {
                 retrier.OnFailure += RetryWrapper<ServerGVFSConfig>.StandardErrorHandler(this.Tracer, requestId, "QueryGvfsConfig");
+            }
+
+            if (updateProgress != null)
+            {
+                retrier.OnFailure += eArgs =>
+                {
+                    string status = eArgs.Error is GitObjectsHttpException httpEx
+                        ? $"Server returned {(int)httpEx.StatusCode} ({httpEx.StatusCode})"
+                        : eArgs.Error?.Message ?? "Unknown error";
+
+                    if (eArgs.WillRetry)
+                    {
+                        updateProgress($"Network: {status}, retrying (attempt {eArgs.TryCount}/{maxAttempts})...");
+                    }
+                    else
+                    {
+                        updateProgress($"Network: {status}");
+                    }
+                };
             }
 
             RetryWrapper<ServerGVFSConfig>.InvocationResult output = retrier.Invoke(
