@@ -13,9 +13,11 @@ namespace GVFS.Common.Git
     public class GitAuthentication
     {
         private const double MaxBackoffSeconds = 30;
+        private const int DefaultCredentialTimeoutMs = 30_000;
 
         private readonly Lock gitAuthLock = new Lock();
         private readonly ICredentialStore credentialStore;
+        private readonly GitProcess gitProcess;
         private readonly string repoUrl;
 
         private int numberOfAttempts = 0;
@@ -29,6 +31,7 @@ namespace GVFS.Common.Git
         public GitAuthentication(GitProcess git, string repoUrl)
         {
             this.credentialStore = git;
+            this.gitProcess = git;
             this.repoUrl = repoUrl;
 
             if (git.TryGetConfigUrlMatch("http", this.repoUrl, out Dictionary<string, GitConfigSetting> configSettings))
@@ -213,6 +216,12 @@ namespace GVFS.Common.Git
         /// This saves one HTTP request compared to probing auth separately
         /// and then querying config, and reuses the same TCP/TLS connection.
         /// </summary>
+        /// <param name="skipRetries">
+        /// When true, config queries use a single attempt instead of the full
+        /// retry loop. Use this when a cache server is already configured
+        /// locally — mount can proceed without config on first failure rather
+        /// than blocking on retries that will be masked by the fallback.
+        /// </param>
         public bool TryInitializeAndQueryGVFSConfig(
             ITracer tracer,
             Enlistment enlistment,
@@ -220,7 +229,9 @@ namespace GVFS.Common.Git
             out ServerGVFSConfig serverGVFSConfig,
             out string errorMessage,
             out bool isAuthFailure,
-            Action<string> updateProgress = null)
+            Action<string> updateProgress = null,
+            bool skipRetries = false,
+            int credentialTimeoutMs = DefaultCredentialTimeoutMs)
         {
             if (this.isInitialized)
             {
@@ -231,7 +242,11 @@ namespace GVFS.Common.Git
             errorMessage = null;
             isAuthFailure = false;
 
-            using (ConfigHttpRequestor configRequestor = new ConfigHttpRequestor(tracer, enlistment, retryConfig))
+            RetryConfig effectiveRetryConfig = skipRetries
+                ? new RetryConfig(maxRetries: 0, retryConfig.Timeout)
+                : retryConfig;
+
+            using (ConfigHttpRequestor configRequestor = new ConfigHttpRequestor(tracer, enlistment, effectiveRetryConfig))
             {
                 HttpStatusCode? httpStatus;
 
@@ -256,7 +271,7 @@ namespace GVFS.Common.Git
                 this.IsAnonymous = false;
                 updateProgress?.Invoke("Fetching credentials");
 
-                if (!this.TryCallGitCredential(tracer, out errorMessage))
+                if (!this.TryCallGitCredential(tracer, out errorMessage, credentialTimeoutMs))
                 {
                     isAuthFailure = true;
                     updateProgress?.Invoke("Credential fetch failed: " + errorMessage);
@@ -379,11 +394,11 @@ namespace GVFS.Common.Git
             this.numberOfAttempts++;
         }
 
-        private bool TryCallGitCredential(ITracer tracer, out string errorMessage)
+        private bool TryCallGitCredential(ITracer tracer, out string errorMessage, int timeoutMs = -1)
         {
             string gitUsername;
             string gitPassword;
-            if (!this.credentialStore.TryGetCredential(tracer, this.repoUrl, out gitUsername, out gitPassword, out errorMessage))
+            if (!this.gitProcess.TryGetCredential(tracer, this.repoUrl, out gitUsername, out gitPassword, out errorMessage, timeoutMs))
             {
                 this.UpdateBackoff();
                 return false;

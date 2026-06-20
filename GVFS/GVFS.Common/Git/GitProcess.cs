@@ -299,6 +299,17 @@ namespace GVFS.Common.Git
             out string password,
             out string errorMessage)
         {
+            return this.TryGetCredential(tracer, repoUrl, out username, out password, out errorMessage, timeoutMs: -1);
+        }
+
+        public virtual bool TryGetCredential(
+            ITracer tracer,
+            string repoUrl,
+            out string username,
+            out string password,
+            out string errorMessage,
+            int timeoutMs)
+        {
             username = null;
             password = null;
             errorMessage = null;
@@ -311,16 +322,29 @@ namespace GVFS.Common.Git
                     GenerateCredentialVerbCommand("fill"),
                     stdin => stdin.Write($"url={repoUrl}\n\n"),
                     parseStdOutLine: null,
-                    usePreCommandHook: false);
+                    usePreCommandHook: false,
+                    timeoutMs: timeoutMs);
 
                 if (gitCredentialOutput.ExitCodeIsFailure)
                 {
                     EventMetadata errorData = new EventMetadata();
-                    tracer.RelatedWarning(
-                        errorData,
-                        "Git could not get credentials: " + gitCredentialOutput.Errors,
-                        Keywords.Network | Keywords.Telemetry);
-                    errorMessage = gitCredentialOutput.Errors;
+
+                    if (gitCredentialOutput.Errors.StartsWith("Operation timed out"))
+                    {
+                        errorMessage = "Credential manager did not respond within " + (timeoutMs / 1000) + " seconds";
+                        tracer.RelatedWarning(
+                            errorData,
+                            "Git credential fill timed out after " + timeoutMs + "ms",
+                            Keywords.Network | Keywords.Telemetry);
+                    }
+                    else
+                    {
+                        errorMessage = gitCredentialOutput.Errors;
+                        tracer.RelatedWarning(
+                            errorData,
+                            "Git could not get credentials: " + gitCredentialOutput.Errors,
+                            Keywords.Network | Keywords.Telemetry);
+                    }
 
                     return false;
                 }
@@ -1113,7 +1137,8 @@ namespace GVFS.Common.Git
             Action<StreamWriter> writeStdIn,
             Action<string> parseStdOutLine,
             bool usePreCommandHook = true,
-            string gitObjectsDirectory = null)
+            string gitObjectsDirectory = null,
+            int timeoutMs = -1)
         {
             // This git command should not need/use the working directory of the repo.
             // Run git.exe in Environment.SystemDirectory to ensure the git.exe process
@@ -1125,7 +1150,7 @@ namespace GVFS.Common.Git
                 useReadObjectHook: false,
                 writeStdIn: writeStdIn,
                 parseStdOutLine: parseStdOutLine,
-                timeoutMs: -1,
+                timeoutMs: timeoutMs,
                 gitObjectsDirectory: gitObjectsDirectory,
                 usePreCommandHook: usePreCommandHook);
         }

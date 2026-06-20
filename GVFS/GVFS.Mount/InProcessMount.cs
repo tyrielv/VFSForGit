@@ -129,6 +129,7 @@ namespace GVFS.Mount
             // and config query into at most 2 HTTP requests (1 for anonymous repos), reusing
             // the same HttpClient/TCP connection.
             Stopwatch parallelTimer = Stopwatch.StartNew();
+            bool hasCacheServer = this.cacheServer != null && !string.IsNullOrWhiteSpace(this.cacheServer.Url);
 
             var networkTask = Task.Run(() =>
             {
@@ -140,17 +141,26 @@ namespace GVFS.Mount
                 if (!this.enlistment.Authentication.TryInitializeAndQueryGVFSConfig(
                     this.tracer, this.enlistment, this.retryConfig,
                     out config, out authConfigError, out isAuthFailure,
-                    updateProgress: message => this.mountProgressMessage = message))
+                    updateProgress: message => this.mountProgressMessage = message,
+                    skipRetries: hasCacheServer))
                 {
-                    if (this.cacheServer != null && !string.IsNullOrWhiteSpace(this.cacheServer.Url))
+                    if (hasCacheServer)
                     {
                         this.tracer.RelatedWarning("Mount will proceed with fallback cache server: " + authConfigError);
                         config = null;
                     }
                     else
                     {
+                        ReturnCode exitCode = ReturnCode.NetworkError;
+                        if (isAuthFailure)
+                        {
+                            exitCode = authConfigError != null && authConfigError.Contains("Credential manager did not respond")
+                                ? ReturnCode.CredentialTimeout
+                                : ReturnCode.AuthenticationError;
+                        }
+
                         this.FailMountAndExit(
-                            isAuthFailure ? ReturnCode.AuthenticationError : ReturnCode.GenericError,
+                            exitCode,
                             "Unable to query /gvfs/config" + Environment.NewLine + authConfigError);
                     }
                 }
