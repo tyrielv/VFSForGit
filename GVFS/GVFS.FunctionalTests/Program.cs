@@ -91,6 +91,11 @@ namespace GVFS.FunctionalTests
                     excludeCategories.Add(Categories.SkipInCI);
                 }
 
+                // THROWAWAY (ft-failure-diagnostics-citest branch): run ONLY the
+                // failure-diagnostics smoke fixture so CI exercises the new mount
+                // dump + log preservation quickly. Do NOT merge.
+                includeCategories.Add(Tests.FailureDiagnosticsSmokeTests.SmokeCategory);
+
                 GVFSTestConfig.FileSystemRunners = FileSystemRunners.FileSystemRunner.DefaultRunners;
             }
 
