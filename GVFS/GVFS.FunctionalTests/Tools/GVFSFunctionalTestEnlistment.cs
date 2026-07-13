@@ -404,7 +404,13 @@ namespace GVFS.FunctionalTests.Tools
 
             try
             {
-                string filter = this.EnlistmentRoot.Replace("\\", "\\\\");
+                // Match on the enlistment's unique leaf folder id rather than the
+                // full path. PowerShell's -like treats '\' as a literal (not an
+                // escape), so doubling backslashes in the full path would produce a
+                // pattern that never matches a real (single-backslash) command line.
+                // The leaf id is unique and free of path separators and wildcard
+                // metacharacters, so it needs no escaping.
+                string filter = Path.GetFileName(this.EnlistmentRoot.TrimEnd('\\', '/'));
                 var psi = new System.Diagnostics.ProcessStartInfo("powershell.exe")
                 {
                     Arguments = $"-NoProfile -Command \"Get-CimInstance Win32_Process -Filter \\\"Name='GVFS.Mount.exe'\\\" | Where-Object {{ $_.CommandLine -like '*{filter}*' }} | ForEach-Object {{ $_.ProcessId }}\"",
