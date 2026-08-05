@@ -47,6 +47,22 @@ namespace GVFS.Platform.Windows
         private static readonly TimeSpan ActiveEnumerationStaleTimeout = TimeSpan.FromMinutes(5);
         private static readonly TimeSpan ActiveEnumerationEvictionSweepInterval = TimeSpan.FromMinutes(1);
 
+        // ProjFS can deliver a GetDirectoryEnumeration that races the EndDirectoryEnumeration for the
+        // same handle (a query in flight while the directory handle is closing, or the querying
+        // process dying mid-enumeration). To attribute such a Get to a just-ended enumeration rather
+        // than an ID GVFS never held, ended enumeration IDs are retained this long after removal.
+        private static readonly TimeSpan RecentlyEndedEnumerationRetention = TimeSpan.FromSeconds(30);
+
+        // A GetDirectoryEnumeration miss for the same ID can repeat in a tight loop (an application
+        // re-enumerating a handle whose Start GVFS lost - e.g. across a provider restart), producing
+        // telemetry storms. The full error is emitted once per ID; repeats within this window are
+        // suppressed so the machine-based signal survives without the per-machine event storm.
+        private static readonly TimeSpan ReportedMissingEnumerationRetention = TimeSpan.FromMinutes(5);
+
+        // Throttle for pruning the two tracking maps below. The prune runs from
+        // EndDirectoryEnumerationCallback so it operates even while eviction is disabled (the default).
+        private static readonly TimeSpan EnumerationTrackingPruneInterval = TimeSpan.FromSeconds(30);
+
         // Effective staleness cutoff for a never-ended enumeration. Defaults to the constant above;
         // overridable by tests via ActiveEnumerationStaleTimeoutForTest.
         private TimeSpan activeEnumerationStaleTimeout = ActiveEnumerationStaleTimeout;
@@ -65,16 +81,34 @@ namespace GVFS.Platform.Windows
         // delivery. Bounded by pruning during each sweep; empty while eviction is disabled (the default).
         private readonly ConcurrentDictionary<Guid, long> recentlyEvictedEnumerations = new ConcurrentDictionary<Guid, long>();
 
+        // Enumeration IDs recently removed by EndDirectoryEnumerationCallback, mapped to the monotonic
+        // tick at which they were ended. Retained briefly (RecentlyEndedEnumerationRetention) so a
+        // GetDirectoryEnumeration that races or follows the End for the same ID is attributed to a
+        // recently-ended enumeration (a benign ProjFS close/query race) rather than an ID GVFS never
+        // held. Pruned by PruneEnumerationTrackingMaps. Guids are never reused, so age-based pruning
+        // is sufficient.
+        private readonly ConcurrentDictionary<Guid, long> recentlyEndedEnumerations = new ConcurrentDictionary<Guid, long>();
+
+        // Enumeration IDs for which a "Failed to find active enumeration ID" error was already emitted,
+        // mapped to the monotonic tick of the first report. Suppresses duplicate error telemetry when a
+        // caller re-Gets the same missing ID in a loop. Pruned by PruneEnumerationTrackingMaps.
+        private readonly ConcurrentDictionary<Guid, long> recentlyReportedMissingEnumerations = new ConcurrentDictionary<Guid, long>();
+
+        // Monotonic (Environment.TickCount64, milliseconds) timestamp of the last prune of the two
+        // tracking maps above.
+        private long lastEnumerationTrackingPruneTickCount = Environment.TickCount64;
+
         /// <summary>
         /// Why a GetDirectoryEnumeration failed to find its enumeration ID. Recorded on the failure
-        /// telemetry so a self-inflicted eviction can be told apart from a ProjFS unknown-ID delivery.
-        /// Kept in sync with the telemetry bucketing in devprod.git.telemetry
+        /// telemetry so self-inflicted causes can be told apart from ProjFS races outside gvfs.exe's
+        /// control. Kept in sync with the telemetry bucketing in devprod.git.telemetry
         /// (gvfs-regression-signatures.kql).
         /// </summary>
         public enum EnumerationFailureReason
         {
-            Unknown = 0,   // ProjFS delivered an ID GVFS never held or already ended (outside gvfs.exe's control).
-            Evicted,       // GVFS's own stale-enumeration eviction removed a live enumeration (self-inflicted).
+            NeverSeen = 0,   // ProjFS delivered an ID GVFS never held: never started, or from before a provider restart (outside gvfs.exe's control).
+            Evicted,         // GVFS's own stale-enumeration eviction removed a live enumeration (self-inflicted).
+            EndedRecently,   // ProjFS delivered a Get racing or following the End for the same enumeration - a benign close/query race (outside gvfs.exe's control).
         }
 
         public WindowsFileSystemVirtualizer(GVFSContext context, GVFSGitObjects gitObjects)
@@ -265,6 +299,49 @@ namespace GVFS.Platform.Windows
                     TracingConstants.MessageKey.WarningMessage,
                     nameof(this.EvictStaleEnumerations) + ": evicted stale directory enumerations that ProjFS never ended, to bound memory usage");
                 this.Context.Tracer.RelatedEvent(EventLevel.Warning, nameof(this.EvictStaleEnumerations), metadata, Keywords.Telemetry);
+            }
+        }
+
+        // Prunes the recently-ended and recently-reported-missing tracking maps. Throttled so it is a
+        // cheap no-op on most calls. Runs from EndDirectoryEnumerationCallback so it operates even
+        // while stale-enumeration eviction is disabled (the default). Guids are never reused, so
+        // pruning by age is sufficient.
+        private void PruneEnumerationTrackingMaps()
+        {
+            if (this.recentlyEndedEnumerations.IsEmpty && this.recentlyReportedMissingEnumerations.IsEmpty)
+            {
+                return;
+            }
+
+            long now = Environment.TickCount64;
+            long last = Interlocked.Read(ref this.lastEnumerationTrackingPruneTickCount);
+            if (now - last < (long)EnumerationTrackingPruneInterval.TotalMilliseconds)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref this.lastEnumerationTrackingPruneTickCount, now, last) != last)
+            {
+                // Another thread just claimed this prune interval.
+                return;
+            }
+
+            long endedCutoff = now - (long)RecentlyEndedEnumerationRetention.TotalMilliseconds;
+            foreach (KeyValuePair<Guid, long> tracked in this.recentlyEndedEnumerations)
+            {
+                if (tracked.Value < endedCutoff)
+                {
+                    this.recentlyEndedEnumerations.TryRemove(tracked.Key, out _);
+                }
+            }
+
+            long reportedCutoff = now - (long)ReportedMissingEnumerationRetention.TotalMilliseconds;
+            foreach (KeyValuePair<Guid, long> tracked in this.recentlyReportedMissingEnumerations)
+            {
+                if (tracked.Value < reportedCutoff)
+                {
+                    this.recentlyReportedMissingEnumerations.TryRemove(tracked.Key, out _);
+                }
             }
         }
 
@@ -511,20 +588,38 @@ namespace GVFS.Platform.Windows
                 ActiveEnumeration activeEnumeration = null;
                 if (!this.activeEnumerations.TryGetValue(enumerationId, out activeEnumeration))
                 {
-                    EventMetadata metadata = this.CreateEventMetadata(enumerationId);
-                    metadata.Add("filterFileName", filterFileName);
-                    metadata.Add("restartScan", restartScan);
+                    // Distinguish why the ID is absent so self-inflicted causes can be told apart from
+                    // ProjFS races outside gvfs.exe's control. Check eviction first (the only cause
+                    // GVFS can act on), then a recent End (a benign close/query race), else the ID was
+                    // never held. Kept in sync with the telemetry bucketing in devprod.git.telemetry
+                    // (gvfs-regression-signatures.kql).
+                    EnumerationFailureReason enumerationFailureReason;
+                    if (this.recentlyEvictedEnumerations.ContainsKey(enumerationId))
+                    {
+                        enumerationFailureReason = EnumerationFailureReason.Evicted;
+                    }
+                    else if (this.recentlyEndedEnumerations.ContainsKey(enumerationId))
+                    {
+                        enumerationFailureReason = EnumerationFailureReason.EndedRecently;
+                    }
+                    else
+                    {
+                        enumerationFailureReason = EnumerationFailureReason.NeverSeen;
+                    }
 
-                    // Distinguish a failure caused by GVFS's own stale-enumeration eviction
-                    // (self-inflicted, fixable) from ProjFS delivering an ID GVFS never held or
-                    // already ended (outside gvfs.exe's control). Kept in sync with the telemetry
-                    // bucketing in devprod.git.telemetry (gvfs-regression-signatures.kql).
-                    EnumerationFailureReason enumerationFailureReason = this.recentlyEvictedEnumerations.ContainsKey(enumerationId)
-                        ? EnumerationFailureReason.Evicted
-                        : EnumerationFailureReason.Unknown;
-                    metadata.Add(nameof(EnumerationFailureReason), enumerationFailureReason.ToString());
-
-                    this.Context.Tracer.RelatedError(metadata, nameof(this.GetDirectoryEnumerationCallback) + ": Failed to find active enumeration ID");
+                    // Emit the full error only the first time a given ID is seen missing; suppress the
+                    // duplicate telemetry a caller's retry loop would otherwise generate (a single
+                    // stuck enumeration has produced millions of events per machine in the field). The
+                    // machine-based regression signal is preserved because the first occurrence still
+                    // logs at Error.
+                    if (this.recentlyReportedMissingEnumerations.TryAdd(enumerationId, Environment.TickCount64))
+                    {
+                        EventMetadata metadata = this.CreateEventMetadata(enumerationId);
+                        metadata.Add("filterFileName", filterFileName);
+                        metadata.Add("restartScan", restartScan);
+                        metadata.Add(nameof(EnumerationFailureReason), enumerationFailureReason.ToString());
+                        this.Context.Tracer.RelatedError(metadata, nameof(this.GetDirectoryEnumerationCallback) + ": Failed to find active enumeration ID");
+                    }
 
                     return HResult.InternalError;
                 }
@@ -597,6 +692,14 @@ namespace GVFS.Platform.Windows
         {
             try
             {
+                this.PruneEnumerationTrackingMaps();
+
+                // Record the end BEFORE removing from activeEnumerations so a GetDirectoryEnumeration
+                // that races this end - ProjFS can deliver an in-flight Get concurrently with the
+                // handle-close End for the same enumeration - is attributed to a recently-ended
+                // enumeration rather than an ID GVFS never held.
+                this.recentlyEndedEnumerations[enumerationId] = Environment.TickCount64;
+
                 ActiveEnumeration activeEnumeration;
                 if (!this.activeEnumerations.TryRemove(enumerationId, out activeEnumeration))
                 {

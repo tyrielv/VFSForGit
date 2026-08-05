@@ -328,7 +328,7 @@ namespace GVFS.UnitTests.Windows.Virtualization
         }
 
         [TestCase]
-        public void GetDirectoryEnumerationTagsEvictedVersusUnknownId()
+        public void GetDirectoryEnumerationTagsMissReasonAndDeduplicates()
         {
             using (WindowsFileSystemVirtualizerTester tester = new WindowsFileSystemVirtualizerTester(this.Repo, new[] { "test" }))
             {
@@ -355,11 +355,27 @@ namespace GVFS.UnitTests.Windows.Virtualization
                 mockTracker.RelatedErrorEvents.Any(
                     e => e.Contains("Failed to find active enumeration ID") && e.Contains("\"EnumerationFailureReason\":\"Evicted\"")).ShouldBeTrue();
 
-                // A Get for an ID GVFS never held is attributed to a ProjFS unknown-ID delivery.
+                // A Get for an ID GVFS never held is attributed to a never-seen delivery.
                 Guid neverSeenId = Guid.NewGuid();
                 tester.MockVirtualization.RequiredCallbacks.GetDirectoryEnumerationCallback(4, neverSeenId, string.Empty, false, null).ShouldEqual(HResult.InternalError);
                 mockTracker.RelatedErrorEvents.Any(
-                    e => e.Contains("Failed to find active enumeration ID") && e.Contains("\"EnumerationFailureReason\":\"Unknown\"")).ShouldBeTrue();
+                    e => e.Contains("Failed to find active enumeration ID") && e.Contains("\"EnumerationFailureReason\":\"NeverSeen\"")).ShouldBeTrue();
+
+                // A Get that races/follows the End for the same enumeration is attributed to a benign
+                // close/query race, not a never-seen delivery.
+                Guid endedId = Guid.NewGuid();
+                tester.MockVirtualization.RequiredCallbacks.StartDirectoryEnumerationCallback(5, endedId, "test", TriggeringProcessId, TriggeringProcessImageFileName).ShouldEqual(HResult.Ok);
+                tester.MockVirtualization.RequiredCallbacks.EndDirectoryEnumerationCallback(endedId).ShouldEqual(HResult.Ok);
+                tester.MockVirtualization.RequiredCallbacks.GetDirectoryEnumerationCallback(6, endedId, string.Empty, false, null).ShouldEqual(HResult.InternalError);
+                mockTracker.RelatedErrorEvents.Any(
+                    e => e.Contains("Failed to find active enumeration ID") && e.Contains("\"EnumerationFailureReason\":\"EndedRecently\"")).ShouldBeTrue();
+
+                // Repeated Gets for the same missing ID are de-duplicated: the error is emitted once,
+                // so a caller's retry loop cannot produce a telemetry storm.
+                int errorsForNeverSeenId = mockTracker.RelatedErrorEvents.Count(e => e.Contains("\"EnumerationFailureReason\":\"NeverSeen\""));
+                tester.MockVirtualization.RequiredCallbacks.GetDirectoryEnumerationCallback(7, neverSeenId, string.Empty, false, null).ShouldEqual(HResult.InternalError);
+                tester.MockVirtualization.RequiredCallbacks.GetDirectoryEnumerationCallback(8, neverSeenId, string.Empty, false, null).ShouldEqual(HResult.InternalError);
+                mockTracker.RelatedErrorEvents.Count(e => e.Contains("\"EnumerationFailureReason\":\"NeverSeen\"")).ShouldEqual(errorsForNeverSeenId);
             }
         }
 
