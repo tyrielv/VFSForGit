@@ -247,14 +247,25 @@ namespace GVFS.Virtualization.Projection
                 // Never want to project the common ancestor even if the skip worktree bit is on
                 if ((data.MergeState != MergeStage.CommonAncestor && data.SkipWorktree) || data.MergeState == MergeStage.Yours)
                 {
-                    // A sparse-directory entry (git index.sparse) reaches this point because it
-                    // carries the skip-worktree bit. GVFS cannot expand its tree into the
-                    // projection yet, so fail fast before building a projection that omits the
-                    // collapsed subtree and crashes ProjFS enumeration.
-                    FailIfSparseDirectoryEntry(data);
+                    if (data.IsSparseDirectory)
+                    {
+                        // A sparse-directory entry (git index.sparse) collapses a folder to its
+                        // tree OID. When expansion is disabled, fail fast before building a
+                        // projection that omits the collapsed subtree and crashes ProjFS
+                        // enumeration. When enabled, expand the tree into the projection.
+                        if (!this.projection.SparseIndexExpansionEnabled)
+                        {
+                            FailIfSparseDirectoryEntry(data);
+                        }
 
-                    data.BuildingProjection_ParsePath();
-                    this.projection.AddItemFromIndexEntry(data);
+                        ValidateSparseDirectoryEntry(data);
+                        this.projection.ExpandSparseDirectory(data);
+                    }
+                    else
+                    {
+                        data.BuildingProjection_ParsePath();
+                        this.projection.AddItemFromIndexEntry(data);
+                    }
                 }
                 else
                 {
@@ -262,6 +273,22 @@ namespace GVFS.Virtualization.Projection
                 }
 
                 return FileSystemTaskResult.Success;
+            }
+
+            /// <summary>
+            /// Validate the invariants of a sparse-directory entry before expanding it. On a
+            /// platform that parses the mode field, the entry's type must be Directory (040000);
+            /// on Windows the mode is not parsed, so the trailing '/' is the only signal and no
+            /// further check applies here.
+            /// </summary>
+            private static void ValidateSparseDirectoryEntry(GitIndexEntry data)
+            {
+                if (GVFSPlatform.Instance.FileSystem.SupportsFileMode && data.TypeAndMode.Type != FileType.Directory)
+                {
+                    string path = Encoding.UTF8.GetString(data.PathBuffer, 0, data.PathLength);
+                    throw new InvalidDataException(
+                        $"Sparse-directory entry '{path}' has unexpected type {data.TypeAndMode.Type} (expected {FileType.Directory}).");
+                }
             }
 
             /// <summary>

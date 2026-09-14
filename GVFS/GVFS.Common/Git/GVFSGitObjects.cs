@@ -32,6 +32,7 @@ namespace GVFS.Common.Git
             GVFSVerb,
             NamedPipeMessage,
             SymLinkCreation,
+            ProjectionBuild,
         }
 
         /// <summary>

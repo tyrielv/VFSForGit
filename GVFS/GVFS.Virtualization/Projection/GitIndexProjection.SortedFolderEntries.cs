@@ -2,6 +2,7 @@
 using GVFS.Common.Tracing;
 using System;
 using System.Collections.Generic;
+using System.IO;
 
 namespace GVFS.Virtualization.Projection
 {
@@ -91,8 +92,30 @@ namespace GVFS.Virtualization.Projection
 
             public FileData AddFile(LazyUTF8String name, byte[] shaBytes)
             {
+                if (name.IsEmpty)
+                {
+                    throw new InvalidDataException("Cannot add a file with an empty name to the projection");
+                }
+
                 int insertionIndex = this.GetInsertionIndex(name);
                 return this.InsertFile(name, shaBytes, insertionIndex);
+            }
+
+            /// <summary>
+            /// Insert a new child folder with a known inclusion state. Used when expanding a
+            /// sparse-directory entry's tree, where every child folder is new. The insertion
+            /// index is found by binary search, so git tree order (which differs from the
+            /// projection's sorted order) is handled correctly.
+            /// </summary>
+            public FolderData AddFolder(LazyUTF8String name, bool isIncluded)
+            {
+                if (name.IsEmpty)
+                {
+                    throw new InvalidDataException("Cannot add a folder with an empty name to the projection");
+                }
+
+                int insertionIndex = this.GetInsertionIndex(name);
+                return this.InsertFolder(name, insertionIndex, isIncluded);
             }
 
             public FolderData GetOrAddFolder(

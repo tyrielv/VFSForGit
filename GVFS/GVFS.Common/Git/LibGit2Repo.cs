@@ -251,6 +251,74 @@ namespace GVFS.Common.Git
         }
 
         /// <summary>
+        /// Enumerate a locally-present tree object, calling <paramref name="visitor"/> once per entry.
+        /// This does no network work. A tree that is not present locally returns
+        /// <see cref="TreeEnumerationResult.MissingTree"/> without calling the visitor, so the caller
+        /// can download it and retry.
+        /// </summary>
+        /// <param name="treeSha">The 40-character hex SHA of the tree to read.</param>
+        /// <param name="visitor">Called once per entry. Spans are only valid for the call.</param>
+        public virtual unsafe TreeEnumerationResult EnumerateTree(string treeSha, TreeEntryVisitor visitor)
+        {
+            IntPtr treeHandle;
+            if (Native.RevParseSingle(out treeHandle, this.RepoHandle, treeSha) != Native.ResultCode.Success
+                || treeHandle == IntPtr.Zero)
+            {
+                // The object could not be opened. Distinguish "present but unreadable" (corrupt)
+                // from "not present" (missing) so the caller knows whether a download can help.
+                return this.ObjectExists(treeSha) ? TreeEnumerationResult.CorruptTree : TreeEnumerationResult.MissingTree;
+            }
+
+            try
+            {
+                if (Native.Object.GetType(treeHandle) != Native.ObjectTypes.Tree)
+                {
+                    return TreeEnumerationResult.NotTree;
+                }
+
+                uint entryCount = Native.Tree.GetEntryCount(treeHandle);
+                for (uint i = 0; i < entryCount; i++)
+                {
+                    IntPtr entryHandle = Native.Tree.GetEntryByIndex(treeHandle, i);
+                    if (entryHandle == IntPtr.Zero)
+                    {
+                        return TreeEnumerationResult.CorruptTree;
+                    }
+
+                    IntPtr namePtr = Native.Tree.GetEntryName(entryHandle);
+                    IntPtr idPtr = Native.Tree.GetEntryId(entryHandle);
+                    if (namePtr == IntPtr.Zero || idPtr == IntPtr.Zero)
+                    {
+                        return TreeEnumerationResult.CorruptTree;
+                    }
+
+                    int nameLength = 0;
+                    byte* nameBytes = (byte*)namePtr;
+                    while (nameBytes[nameLength] != 0)
+                    {
+                        nameLength++;
+                    }
+
+                    ReadOnlySpan<byte> nameSpan = new ReadOnlySpan<byte>(nameBytes, nameLength);
+                    ReadOnlySpan<byte> idSpan = new ReadOnlySpan<byte>((byte*)idPtr, GVFSConstants.ShaStringLength / 2);
+
+                    uint entryMode = Native.Tree.GetEntryFileMode(entryHandle);
+                    bool isTree = entryMode == Native.Tree.TreeEntryFileModeDirectory;
+
+                    visitor(nameSpan, idSpan, (ushort)entryMode, isTree);
+
+                    /* entryHandle, namePtr, and idPtr are all owned by treeHandle, so we don't free them. */
+                }
+            }
+            finally
+            {
+                Native.Object.Free(treeHandle);
+            }
+
+            return TreeEnumerationResult.Success;
+        }
+
+        /// <summary>
         /// Get a config value from the repo's git config.
         /// </summary>
         /// <param name="name">Name of the config entry</param>
@@ -761,6 +829,11 @@ namespace GVFS.Common.Git
 
                 [DllImport(Git2NativeLibName, EntryPoint = "git_tree_entry_id")]
                 public static extern IntPtr GetEntryId(IntPtr entryHandle);
+
+                /* Returns a const char* owned by the entry (and therefore by the tree).
+                 * Do not free it; it is only valid while the tree handle is alive. */
+                [DllImport(Git2NativeLibName, EntryPoint = "git_tree_entry_name")]
+                public static extern IntPtr GetEntryName(IntPtr entryHandle);
 
                 /* git_tree_entry_type requires the object to exist, so we can't use it to check if
                  * a missing entry is a tree. Instead, we can use the file mode to determine if it is a tree. */

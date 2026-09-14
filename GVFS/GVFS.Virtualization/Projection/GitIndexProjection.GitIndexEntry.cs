@@ -62,6 +62,28 @@ namespace GVFS.Virtualization.Projection
                 get { return this.PathLength > 0 && this.PathBuffer[this.PathLength - 1] == PathSeparatorCode; }
             }
 
+            /// <summary>
+            /// True when this entry is a sparse-directory entry (git index.sparse). Such an entry
+            /// stores a folder collapsed to its tree OID, so its path ends in the git path
+            /// separator. Detection does not depend on <see cref="FileTypeAndMode"/>, so it works
+            /// on Windows, where the parser skips the mode field.
+            /// </summary>
+            public bool IsSparseDirectory
+            {
+                get { return this.PathEndsInSlash; }
+            }
+
+            /// <summary>
+            /// The path length without the trailing separator of a sparse-directory entry. For a
+            /// normal entry this equals <see cref="PathLength"/>. Use this length when parsing a
+            /// sparse-directory entry's path into projection parts, so the collapsed folder name
+            /// (for example "GVFS") is produced instead of an empty final part after the '/'.
+            /// </summary>
+            public int ProjectionPathLength
+            {
+                get { return this.IsSparseDirectory ? this.PathLength - 1 : this.PathLength; }
+            }
+
             public FolderData BuildingProjection_LastParent { get; set; }
 
             // Only used when buildingNewProjection is true
@@ -154,6 +176,45 @@ namespace GVFS.Virtualization.Projection
                     // We unrolled the final part calculation to after the loop, to avoid having to do a 0-byte check inside the for loop
                     this.BuildingProjection_PathParts[partIndex] = LazyUTF8String.FromByteArray(pathPtr + currentPartStartIndex, this.PathLength - currentPartStartIndex);
 
+                    this.BuildingProjection_NumParts++;
+                }
+            }
+
+            /// <summary>
+            /// Parses the first <paramref name="logicalLength"/> bytes of the path into projection
+            /// parts, ignoring the same-parent optimization. Callers must call
+            /// <see cref="ClearLastParent"/> first. Used for a sparse-directory entry, where
+            /// <paramref name="logicalLength"/> is <see cref="ProjectionPathLength"/> (the path
+            /// without its trailing '/'), so the collapsed folder name becomes the final part
+            /// instead of an empty part after the separator.
+            /// </summary>
+            /// <remarks>
+            /// This overload does not read or write <see cref="PathBuffer"/> at or beyond
+            /// <paramref name="logicalLength"/>, and it does not touch the previous-separator
+            /// state, so the next entry's index-v4 prefix decompression is unaffected.
+            /// </remarks>
+            public unsafe void BuildingProjection_ParsePath(int logicalLength)
+            {
+                this.BuildingProjection_NumParts = 0;
+                this.BuildingProjection_HasSameParentAsLastEntry = false;
+
+                int currentPartStartIndex = 0;
+                int partIndex = 0;
+
+                fixed (byte* pathPtr = this.PathBuffer)
+                {
+                    for (int i = 0; i < logicalLength; i++)
+                    {
+                        if (pathPtr[i] == PathSeparatorCode)
+                        {
+                            this.BuildingProjection_PathParts[partIndex] = LazyUTF8String.FromByteArray(pathPtr + currentPartStartIndex, i - currentPartStartIndex);
+                            partIndex++;
+                            currentPartStartIndex = i + 1;
+                            this.BuildingProjection_NumParts++;
+                        }
+                    }
+
+                    this.BuildingProjection_PathParts[partIndex] = LazyUTF8String.FromByteArray(pathPtr + currentPartStartIndex, logicalLength - currentPartStartIndex);
                     this.BuildingProjection_NumParts++;
                 }
             }
