@@ -888,6 +888,37 @@ namespace GVFS.Common.Git
             return this.InvokeGitAgainstDotGitFolder("read-tree " + treeIsh);
         }
 
+        /// <summary>
+        /// Expands the on-disk index from a sparse (collapsed) index back to a full index,
+        /// in place, without changing the working tree. This is the recovery path for a
+        /// persisted sparse index that VFS for Git cannot yet project.
+        /// </summary>
+        /// <remarks>
+        /// Must run with GVFS unmounted, so every GVFS hook is neutralized:
+        ///   -c core.virtualfilesystem=   disables the VFS hook, which otherwise blocks on a
+        ///                                named pipe to a mount that is not running.
+        ///   -c core.hookspath=           disables the GVFS pre-command hook, which aborts git
+        ///                                commands when the mount is down.
+        ///   -c index.sparse=false        forces git to write a full (expanded) index.
+        /// COMMAND_HOOK_LOCK=true (usePreCommandHook: false) is belt-and-suspenders for the
+        /// pre-command hook. --force-write-index makes git rewrite the index even though no
+        /// tracked content changed; reading the sparse index expands it in-core and, with
+        /// index.sparse=false, the rewrite persists the expanded form. Unlike read-tree HEAD,
+        /// this does not reset staged changes, so it is safe against data loss.
+        /// </remarks>
+        public Result ForceExpandSparseIndex()
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.CoreVirtualFileSystemName + "= -c core.hookspath= -c " + GitConfigSetting.IndexSparseName + "=false update-index --force-write-index",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: false,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false);
+        }
+
         public Result PrunePacked(string gitObjectDirectory)
         {
             return this.InvokeGitAgainstDotGitFolder(

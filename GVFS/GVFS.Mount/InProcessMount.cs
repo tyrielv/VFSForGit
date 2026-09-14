@@ -1898,7 +1898,13 @@ namespace GVFS.Mount
 
         private bool TrySetRequiredGitConfigSettings()
         {
-            Dictionary<string, string> requiredSettings = RequiredGitConfig.GetRequiredSettings(this.enlistment);
+            bool autoSparseIndexEnabled = LibGit2Repo.GetConfigBoolOrDefault(
+                this.tracer,
+                this.enlistment.WorkingDirectoryBackingRoot,
+                GVFSConstants.GitConfig.AutoSparseIndex,
+                GVFSConstants.GitConfig.AutoSparseIndexDefault);
+
+            Dictionary<string, string> requiredSettings = RequiredGitConfig.GetRequiredSettings(this.enlistment, autoSparseIndexEnabled);
 
             GitProcess git = new GitProcess(this.enlistment);
 

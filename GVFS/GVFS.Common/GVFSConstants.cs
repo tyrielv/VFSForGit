@@ -81,6 +81,17 @@ namespace GVFS.Common
 
             public const string PrefetchOffload = GVFSPrefix + "prefetch-offload";
             public const bool PrefetchOffloadDefault = false;
+
+            /* Gates the built-in sparse-index CLI surface (gvfs sparse-index). When true,
+             * clone/mount/repair also write the git config settings that let git's on-disk
+             * index collapse to cone-format directory entries (core.sparseCheckoutCone,
+             * index.sparse, sparse.expectFilesOutsideOfPatterns), and the recovery/expand
+             * path is available. Default false so that, for every existing repo, the
+             * required git config is byte-for-byte what it is today. Unlike gvfs sparse,
+             * which narrows the projection, this keeps the projection full and narrows the
+             * index. See RequiredGitConfig and SparseIndexVerb. */
+            public const string AutoSparseIndex = GVFSPrefix + "auto-sparse-index";
+            public const bool AutoSparseIndexDefault = false;
         }
 
         public static class LocalGVFSConfig
@@ -137,6 +148,7 @@ namespace GVFS.Common
             public const string Repair = "repair";
             public const string Service = "service";
             public const string Sparse = "sparse";
+            public const string SparseIndex = "sparse_index";
             public const string UpgradeVerb = UpgradePrefix + "_verb";
             public const string UpgradeProcess = UpgradePrefix + "_process";
             public const string UpgradeSystemInstaller = UpgradePrefix + "_system_installer";
