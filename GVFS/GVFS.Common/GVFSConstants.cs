@@ -59,6 +59,15 @@ namespace GVFS.Common
             public const string ShowHydrationStatus = GVFSPrefix + "show-hydration-status";
             public const bool ShowHydrationStatusDefault = false;
 
+            /* Gates automatic sparse-index cone management. When true, the pre-command
+             * hook asks the mount to widen the sparse-index cone to cover the paths a
+             * Git command names, and the post-command hook asks it to narrow back. This
+             * pre-empts the one measured sparse-index expansion trigger (naming an
+             * out-of-cone path). Disabled by default. The mount-side handler is owned by
+             * the cone-management work; the hook side only sends the requests. */
+            public const string AutoSparseIndex = GVFSPrefix + "auto-sparse-index";
+            public const bool AutoSparseIndexDefault = false;
+
             /* Gates the CLI mount-progress display layer (progress phase strings surfaced
              * over the named pipe during `gvfs mount`). Disabled by default so stabilization
              * builds keep the reliability-relevant early-pipe infrastructure without shipping
