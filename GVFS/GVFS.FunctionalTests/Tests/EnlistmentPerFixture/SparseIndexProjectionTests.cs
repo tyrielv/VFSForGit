@@ -24,9 +24,10 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
     /// the sparse index and in the HEAD tree.
     ///
     /// This fixture collapses the GVFS top-level directory to a sparse-directory
-    /// entry on the live mount, remounts with the flag on, and asserts that every
-    /// file in GVFS\FastFetch enumerates and that GVFS\FastFetch\Program.cs reads
-    /// with the correct content, while the on-disk index stays collapsed.
+    /// entry on the live mount, remounts with the flag on, and proves completeness
+    /// by asserting the entire projected working-tree file set equals HEAD, that the
+    /// deep file GVFS\FastFetch\Program.cs reads with the correct content, and that
+    /// the on-disk index stays collapsed the whole time.
     /// </summary>
     [TestFixture]
     public class SparseIndexProjectionTests : TestsWithEnlistmentPerFixture
@@ -36,37 +37,38 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
         // Read git objects/trees directly instead of through the GVFS projection.
         private const string DisableVfs = "-c core.virtualfilesystem= -c core.hookspath= -c core.quotepath=false";
 
-        // The collapsed directory and the deep file under test.
-        private static readonly string FastFetchRelativeDir = Path.Combine("GVFS", "FastFetch");
+        // The deep file under test - the exact file that read as "does not exist"
+        // from a truncated projection of a collapsed index.
         private static readonly string ProgramCsRelativePath = Path.Combine("GVFS", "FastFetch", "Program.cs");
-        private const string FastFetchTreePath = "HEAD:GVFS/FastFetch";
         private const string ProgramCsTreePath = "HEAD:GVFS/FastFetch/Program.cs";
-        private const string ProgramCsIndexPath = "GVFS/FastFetch/Program.cs";
+        private const string ProgramCsGitPath = "GVFS/FastFetch/Program.cs";
 
         // The mount previously crashed within a few seconds of coming up. Confirm the
         // mount is still serving well past that window.
         private const int PostMountStabilityWindowMs = 4000;
 
-        // Full ForTests index is ~468 entries; a collapsed index is a handful. Any
-        // value at or below this bound proves the on-disk index is still collapsed.
+        // Full ForTests index is hundreds of entries; a collapsed index is a handful.
+        // Any value at or below this bound proves the on-disk index is still collapsed.
         private const int CollapsedIndexUpperBound = 100;
 
         private FileSystemRunner fileSystem = new SystemIORunner();
 
         [TestCase]
-        public void CollapsedSparseIndexProjectsEveryFileInCollapsedDirectory()
+        public void CollapsedSparseIndexProjectsTheCompleteHeadTree()
         {
             string repoRoot = this.Enlistment.RepoRoot;
             string indexPath = Path.Combine(repoRoot, ".git", "index");
             string sparseCheckoutPath = Path.Combine(repoRoot, ".git", "info", "sparse-checkout");
             string projectionCachePath = Path.Combine(this.Enlistment.DotGVFSRoot, "GVFS_projection");
-            string fastFetchVirtualPath = this.Enlistment.GetVirtualPathTo(FastFetchRelativeDir);
             string programCsVirtualPath = this.Enlistment.GetVirtualPathTo(ProgramCsRelativePath);
 
             // The fixture just cloned and mounted this enlistment and nothing has
-            // enumerated GVFS\FastFetch, so it is still virtual. That matters: the first
-            // enumeration after the collapsed remount must go through the expander, not a
-            // stale ProjFS folder placeholder left from an earlier full projection.
+            // enumerated the working tree, so every folder is still virtual. That
+            // matters: the first enumeration after the collapsed remount must go
+            // through the expander, not a stale ProjFS placeholder left from an
+            // earlier full projection. For the same reason the expected set below
+            // comes from the object store (ls-tree), never from a pre-collapse walk
+            // of the working tree.
 
             // 1. Read the full (uncollapsed) entry count for comparison.
             int fullIndexCount = ReadIndexEntryCount(indexPath);
@@ -74,13 +76,13 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
                 CollapsedIndexUpperBound + 1,
                 $"Expected a full index before collapse, but found only {fullIndexCount} entries.");
 
-            // 2. Capture the expected FastFetch children from the HEAD tree. This reads
-            //    trees, not the index, so it does not force expansion.
-            HashSet<string> expectedFastFetchNames = this.ReadTreeChildNames(repoRoot, FastFetchTreePath);
-            expectedFastFetchNames.Count.ShouldBeAtLeast(
-                7,
-                "FastFetch should contain many files; a truncated set means the tree read failed.");
-            expectedFastFetchNames.ShouldContain(name => name.Equals("Program.cs", StringComparison.Ordinal));
+            // 2. Capture the complete expected file set from the HEAD tree. ls-tree
+            //    reads objects, not the working tree, so it materializes no placeholder.
+            HashSet<string> expectedFiles = this.ReadHeadFileSet(repoRoot);
+            expectedFiles.Count.ShouldBeAtLeast(
+                100,
+                "HEAD should contain many files; a short list means the tree read failed.");
+            expectedFiles.ShouldContain(path => path.Equals(ProgramCsGitPath, StringComparison.Ordinal));
 
             // 3. Enable the feature flag and the sparse-index prerequisites.
             this.InvokeGit(repoRoot, $"config {AutoSparseIndexConfig} true");
@@ -95,8 +97,9 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
             // 4. Collapse the index on the live mount. update-index --force-write-index
             //    rewrites the on-disk index in sparse form without touching the working
             //    tree; the active virtual filesystem keeps skip-worktree set so the
-            //    directories actually collapse. The mount re-parses on lock release and
-            //    stays Ready at this repo scale.
+            //    directories actually collapse. (sparse-checkout reapply does not work
+            //    here - it materializes the in-cone working-tree files and fails on the
+            //    ProjFS placeholders. See decisions/0011.)
             ProcessResult collapseResult = GitProcess.InvokeProcess(
                 repoRoot,
                 "-c core.sparseCheckout=true -c core.sparseCheckoutCone=true -c index.sparse=true update-index --force-write-index");
@@ -122,7 +125,7 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
             }
 
             // 7. Mount with the flag on. Time the mount: the projection build expands
-            //    the collapsed directory synchronously here.
+            //    the collapsed directories synchronously here.
             Stopwatch mountTimer = Stopwatch.StartNew();
             this.Enlistment.MountGVFS();
             mountTimer.Stop();
@@ -139,20 +142,25 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
                 CollapsedIndexUpperBound,
                 "Mount re-expanded the on-disk index instead of projecting from the collapsed one.");
 
-            // 9. THE PROOF - enumerate the collapsed directory. Every HEAD-tree child
-            //    must appear. A truncated set reproduces the silent file loss.
-            fastFetchVirtualPath.ShouldBeADirectory(this.fileSystem);
-            HashSet<string> actualFastFetchNames = new HashSet<string>(
-                new DirectoryInfo(fastFetchVirtualPath).GetFileSystemInfos().Select(info => info.Name),
-                StringComparer.Ordinal);
+            // 9. THE PROOF OF COMPLETENESS - the entire projected working tree must
+            //    equal HEAD. A full recursive enumeration (this is the first walk, so
+            //    every placeholder is created fresh from the expanded projection). Any
+            //    missing path is the silent file loss this feature exists to prevent;
+            //    any extra path is a spurious projection.
+            HashSet<string> actualFiles = EnumerateProjectedFiles(repoRoot);
+            List<string> missing = expectedFiles.Except(actualFiles).OrderBy(path => path, StringComparer.Ordinal).ToList();
+            List<string> extra = actualFiles.Except(expectedFiles).OrderBy(path => path, StringComparer.Ordinal).ToList();
 
-            actualFastFetchNames.SetEquals(expectedFastFetchNames).ShouldBeTrue(
-                "FastFetch projection does not match the HEAD tree.\n" +
-                $"  expected ({expectedFastFetchNames.Count}): {string.Join(", ", expectedFastFetchNames.OrderBy(n => n))}\n" +
-                $"  actual   ({actualFastFetchNames.Count}): {string.Join(", ", actualFastFetchNames.OrderBy(n => n))}\n" +
-                $"  missing: {string.Join(", ", expectedFastFetchNames.Except(actualFastFetchNames).OrderBy(n => n))}");
+            TestContext.WriteLine($"[sparse-index] Projected {actualFiles.Count} files; HEAD has {expectedFiles.Count}.");
 
-            // 10. THE PROOF - the deep file reads with the correct content.
+            actualFiles.SetEquals(expectedFiles).ShouldBeTrue(
+                "Projected working-tree file set does not match HEAD.\n" +
+                $"  expected {expectedFiles.Count}, actual {actualFiles.Count}\n" +
+                $"  missing ({missing.Count}): {string.Join(", ", missing.Take(50))}\n" +
+                $"  extra ({extra.Count}): {string.Join(", ", extra.Take(50))}");
+
+            // 10. THE PROOF OF CONTENT - the deep file reads with the correct bytes,
+            //     not just an enumerable name.
             programCsVirtualPath.ShouldBeAFile(this.fileSystem);
             string projectedContent = File.ReadAllText(programCsVirtualPath);
             projectedContent.Length.ShouldBeAtLeast(1, "Program.cs projected as an empty file.");
@@ -169,10 +177,10 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
                 TestContext.WriteLine($"[sparse-index] git show could not read the blob for comparison: {expectedContentResult.Errors}");
             }
 
-            // 11. Reading the file must not have re-expanded the on-disk index.
+            // 11. Reading files must not have re-expanded the on-disk index.
             ReadIndexEntryCount(indexPath).ShouldBeAtMost(
                 CollapsedIndexUpperBound,
-                "Reading a file re-expanded the on-disk index; the read did not come from the collapsed projection.");
+                "Enumerating and reading re-expanded the on-disk index; the projection did not come from the collapsed index.");
 
             // 12. Confirm the mount stays healthy past the window in which it used to
             //     crash, and the file is still readable.
@@ -214,6 +222,44 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
             return value.Replace("\r\n", "\n").Replace("\r", "\n");
         }
 
+        /// <summary>
+        /// Recursively enumerates every file in the projected working tree (excluding
+        /// the real .git directory), returning repo-root-relative forward-slash paths.
+        /// Directory enumeration only - it creates placeholders but does not hydrate
+        /// file content.
+        /// </summary>
+        private static HashSet<string> EnumerateProjectedFiles(string repoRoot)
+        {
+            HashSet<string> files = new HashSet<string>(StringComparer.Ordinal);
+            Stack<string> directories = new Stack<string>();
+            directories.Push(repoRoot);
+            int prefixLength = repoRoot.Length + 1;
+
+            while (directories.Count > 0)
+            {
+                string directory = directories.Pop();
+
+                foreach (string subDirectory in Directory.EnumerateDirectories(directory))
+                {
+                    string name = Path.GetFileName(subDirectory);
+                    if (name.Equals(".git", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    directories.Push(subDirectory);
+                }
+
+                foreach (string file in Directory.EnumerateFiles(directory))
+                {
+                    string relative = file.Substring(prefixLength).Replace(Path.DirectorySeparatorChar, '/');
+                    files.Add(relative);
+                }
+            }
+
+            return files;
+        }
+
         private void AssertProgramCsIsInsideCollapsedEntry(string sparseListing)
         {
             List<string> entries = sparseListing
@@ -223,30 +269,32 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
                 .ToList();
 
             bool hasAncestorSparseDir = entries.Any(
-                entry => entry.EndsWith("/", StringComparison.Ordinal) && ProgramCsIndexPath.StartsWith(entry, StringComparison.Ordinal));
+                entry => entry.EndsWith("/", StringComparison.Ordinal) && ProgramCsGitPath.StartsWith(entry, StringComparison.Ordinal));
             bool hasIndividualEntry = entries.Any(
-                entry => entry.Equals(ProgramCsIndexPath, StringComparison.Ordinal));
+                entry => entry.Equals(ProgramCsGitPath, StringComparison.Ordinal));
 
             hasAncestorSparseDir.ShouldBeTrue(
-                $"{ProgramCsIndexPath} is not inside a collapsed sparse-directory entry; there is nothing to expand.");
+                $"{ProgramCsGitPath} is not inside a collapsed sparse-directory entry; there is nothing to expand.");
             hasIndividualEntry.ShouldBeFalse(
-                $"{ProgramCsIndexPath} is present as an individual index entry; the directory did not collapse.");
+                $"{ProgramCsGitPath} is present as an individual index entry; the directory did not collapse.");
         }
 
-        private HashSet<string> ReadTreeChildNames(string repoRoot, string treePath)
+        private HashSet<string> ReadHeadFileSet(string repoRoot)
         {
-            string output = this.InvokeGit(repoRoot, $"{DisableVfs} ls-tree --name-only {treePath}");
-            HashSet<string> names = new HashSet<string>(StringComparer.Ordinal);
+            // Hooks stay active so a tree object that was not prefetched can still be
+            // fetched on demand; ls-tree reads the object store, not the index.
+            string output = this.InvokeGit(repoRoot, "-c core.quotepath=false ls-tree -r --name-only HEAD");
+            HashSet<string> paths = new HashSet<string>(StringComparer.Ordinal);
             foreach (string line in output.Split('\n'))
             {
                 string trimmed = line.Trim();
                 if (trimmed.Length > 0)
                 {
-                    names.Add(trimmed);
+                    paths.Add(trimmed);
                 }
             }
 
-            return names;
+            return paths;
         }
 
         private string InvokeGit(string repoRoot, string command)
