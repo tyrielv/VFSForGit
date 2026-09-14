@@ -81,6 +81,16 @@ namespace GVFS.Common
 
             public const string PrefetchOffload = GVFSPrefix + "prefetch-offload";
             public const bool PrefetchOffloadDefault = false;
+
+            /* Gates automatic sparse-index cone management in the mount process. When
+             * false (default), GVFS keeps today's sparse-checkout file and modified-path
+             * behavior. When true, the mount maps modified paths to a git cone-mode
+             * sparse-checkout pattern set so the git index can collapse to a sparse index
+             * while the ProjFS projection stays full. The feature is experimental and off
+             * by default; it gates the runtime entry point, not the build, so the cone
+             * builder and writer keep compiling and getting exercised by unit tests. */
+            public const string AutoSparseIndex = GVFSPrefix + "auto-sparse-index";
+            public const bool AutoSparseIndexDefault = false;
         }
 
         public static class LocalGVFSConfig
