@@ -479,17 +479,93 @@ function Get-SparseDirectoryCount([switch]$Force) {
     return [long]$count
 }
 
+function Invoke-GitMktree([string]$TreeInput) {
+    # Build a tree object from newline-delimited 'ls-tree' style entries. Feed the
+    # bytes over stdin directly (a PowerShell pipeline would append CR to each
+    # line and corrupt the entry names). git mktree normalizes entry order, so
+    # callers do not have to pre-sort.
+    $arguments = Add-SafeGitOptions -Arguments @('-C', $Repo, 'mktree')
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $GitPath
+    foreach ($token in $arguments) { [void]$psi.ArgumentList.Add($token) }
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($TreeInput)
+    $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
+    $process.StandardInput.BaseStream.Flush()
+    $process.StandardInput.Close()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) {
+        throw "git mktree failed with exit code $($process.ExitCode): $stderr"
+    }
+    return $stdout.Trim()
+}
+
+function Get-TreeEntries([string]$TreeIsh) {
+    # 'ls-tree' lines for a tree-ish, or an empty array when the tree does not
+    # exist yet (a fixture directory that is absent from the parent commit).
+    if ([string]::IsNullOrEmpty($TreeIsh)) {
+        return @()
+    }
+    return @(Get-GitOutput -Arguments @('-C', $Repo, 'ls-tree', $TreeIsh))
+}
+
+function Get-TreeEntryName([string]$Line) {
+    $tab = $Line.IndexOf("`t")
+    if ($tab -lt 0) { return $Line }
+    return $Line.Substring($tab + 1)
+}
+
+function Set-FixtureTreeEntry([string]$TreeIsh, [string[]]$Segments, [string]$Blob) {
+    # Recursively produce a new tree equal to $TreeIsh with $Blob installed at the
+    # nested path $Segments. Only the directories along $Segments are rebuilt
+    # (each an O(entries-in-that-directory) mktree), so a fixture never rewrites
+    # the millions of unrelated entries a full-index write-tree would touch, and
+    # it stays fully offline (no promisor fetch of missing objects).
+    $entries = @(Get-TreeEntries -TreeIsh $TreeIsh)
+    $name = $Segments[0]
+
+    if ($Segments.Count -eq 1) {
+        $newLine = "100644 blob $Blob`t$name"
+    }
+    else {
+        $childTree = ''
+        foreach ($line in $entries) {
+            if ((Get-TreeEntryName -Line $line) -eq $name -and $line -match '^\d+ tree ([0-9a-f]+)\t') {
+                $childTree = $matches[1]
+                break
+            }
+        }
+        $newChild = Set-FixtureTreeEntry -TreeIsh $childTree -Segments $Segments[1..($Segments.Count - 1)] -Blob $Blob
+        $newLine = "040000 tree $newChild`t$name"
+    }
+
+    $result = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $entries) {
+        if ((Get-TreeEntryName -Line $line) -ne $name) { $result.Add($line) }
+    }
+    $result.Add($newLine)
+    return Invoke-GitMktree -TreeInput (($result -join "`n") + "`n")
+}
+
 function New-FixtureCommit([string]$Parent, [string]$Path, [string]$Content, [string]$Message) {
-    $temporaryIndex = Join-Path $ScratchRoot "w2-fixture-$([Guid]::NewGuid().ToString('N')).index"
+    # Construct the fixture commit by editing only the tree path that changes.
+    # The original implementation round-tripped the whole index (read-tree +
+    # write-tree). On a multi-million-entry index that rebuilds the entire
+    # cache-tree, and in a partial clone it triggers a promisor fetch. Editing
+    # the tree directly is O(path-depth x directory-width), stays fully offline,
+    # and produces an identical fixture commit (same tree, same content).
     $fixtureFile = Join-Path $ScratchRoot "w2-fixture-$([Guid]::NewGuid().ToString('N')).txt"
-    $oldIndex = [Environment]::GetEnvironmentVariable('GIT_INDEX_FILE')
-    $env:GIT_INDEX_FILE = $temporaryIndex
     try {
         Set-Content -LiteralPath $fixtureFile -Value $Content -Encoding ascii
-        Invoke-SetupGit -Arguments @('-C', $Repo, 'read-tree', $Parent) -Label 'fixture-read-tree'
         $blob = (Get-GitOutput -Arguments @('-C', $Repo, 'hash-object', '-w', $fixtureFile) | Select-Object -Last 1).ToString().Trim()
-        Invoke-SetupGit -Arguments @('-C', $Repo, 'update-index', '--add', '--cacheinfo', "100644,$blob,$Path") -Label 'fixture-update-index'
-        $tree = (Get-GitOutput -Arguments @('-C', $Repo, 'write-tree') | Select-Object -Last 1).ToString().Trim()
+        $segments = $Path -split '/'
+        $tree = Set-FixtureTreeEntry -TreeIsh $Parent -Segments $segments -Blob $blob
         return (Get-GitOutput -Arguments @(
             '-C', $Repo,
             '-c', 'user.name=Sparse Index Benchmark',
@@ -498,13 +574,7 @@ function New-FixtureCommit([string]$Parent, [string]$Path, [string]$Content, [st
         ) | Select-Object -Last 1).ToString().Trim()
     }
     finally {
-        if ($null -eq $oldIndex) {
-            Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:GIT_INDEX_FILE = $oldIndex
-        }
-        Remove-Item -LiteralPath $temporaryIndex, $fixtureFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $fixtureFile -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -535,6 +605,43 @@ function Restore-Base {
 
 function Add-TrackedFileChange([int]$Iteration) {
     Add-Content -LiteralPath (Join-Path $Repo ($benchmarkTrackedPath -replace '/', '\')) -Value "`nSparse index benchmark $runId $Iteration" -Encoding ascii
+}
+
+function Restore-TrackedFixturePath {
+    # In sparse mode the tracked benchmark path lives inside a collapsed
+    # sparse-directory, so it is not an individual index entry: only the parent
+    # directory appears as a sparse-directory entry. 'git checkout -- <path>'
+    # therefore cannot match it ("did not match any file(s) known to git") and
+    # 'git add' would force a full-index expansion. Restore the worktree content
+    # directly from the base-commit blob, which needs no pathspec match and no
+    # index expansion. In full mode keep the original checkout behaviour.
+    if ($IndexMode -ne 'sparse') {
+        Invoke-SetupGit -Arguments @('-C', $Repo, 'checkout', '--quiet', '--', $benchmarkTrackedPath) -Label 'cleanup-tracked-path'
+        return
+    }
+
+    $destination = Join-Path $Repo ($benchmarkTrackedPath -replace '/', '\')
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+    $blob = (Get-GitOutput -Arguments @('-C', $Repo, 'rev-parse', "$baseCommit`:$benchmarkTrackedPath") | Select-Object -Last 1).ToString().Trim()
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $GitPath
+    foreach ($token in (Add-SafeGitOptions -Arguments @('-C', $Repo, 'cat-file', 'blob', $blob))) {
+        [void]$psi.ArgumentList.Add($token)
+    }
+    $psi.RedirectStandardOutput = $true
+    $psi.UseShellExecute = $false
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stream = [System.IO.File]::Create($destination)
+    try {
+        $process.StandardOutput.BaseStream.CopyTo($stream)
+    }
+    finally {
+        $stream.Dispose()
+    }
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) {
+        throw "Could not restore tracked fixture path from blob ${blob}: git cat-file exited $($process.ExitCode)."
+    }
 }
 
 function Prepare-Operation([string]$Operation, [int]$Iteration) {
@@ -669,7 +776,7 @@ function Cleanup-Iteration([string]$Operation) {
     Invoke-CleanupStep -Description 'Restore base commit' -Action { Restore-Base }
     Invoke-CleanupStep -Description 'Restore original index' -Action { Restore-Index }
     Invoke-CleanupStep -Description 'Restore tracked fixture path' -Action {
-        Invoke-SetupGit -Arguments @('-C', $Repo, 'checkout', '--quiet', '--', $benchmarkTrackedPath) -Label 'cleanup-tracked-path'
+        Restore-TrackedFixturePath
     }
 
     foreach ($path in @($mergeFixturePath, $ontoFixturePath, $cleanFixturePath)) {
@@ -740,8 +847,20 @@ if ($trackedMatch.Count -eq 0) {
     throw "The benchmark path is not tracked: $benchmarkTrackedPath"
 }
 if ($IndexMode -eq 'sparse') {
-    $sparsePathMatch = @(Get-GitOutput -Arguments @('-C', $Repo, 'ls-files', '--sparse', '-t', '--', $benchmarkTrackedPath))
-    if (-not ($sparsePathMatch | Where-Object { $_ -like 'S *' })) {
+    # A file that lives inside a collapsed directory is not itself listed by
+    # 'ls-files --sparse'; its containing directory appears instead as a
+    # sparse-directory entry (tag 'S', mode 040000, trailing slash). Confirm the
+    # tracked path is collapsed by checking it has a sparse-directory ancestor.
+    $sparseDirEntries = @(Get-GitOutput -Arguments @('-C', $Repo, 'ls-files', '--sparse', '-t') |
+        ForEach-Object { if ($_ -match '^S\s+(.+)$') { $matches[1].Trim() } })
+    $hasSparseAncestor = $false
+    foreach ($sparseDir in $sparseDirEntries) {
+        if ($benchmarkTrackedPath.StartsWith($sparseDir, [System.StringComparison]::Ordinal)) {
+            $hasSparseAncestor = $true
+            break
+        }
+    }
+    if (-not $hasSparseAncestor) {
         throw "OutsideConePath is not represented by a sparse-directory entry: $benchmarkTrackedPath"
     }
 }
