@@ -134,6 +134,8 @@ namespace GVFS.Hooks
                     RunWorktreePreCommand(args);
                     break;
             }
+
+            TrySendConeWiden(args);
         }
 
         private static bool ArgsBlockHydrationStatus(string[] args)
@@ -154,6 +156,8 @@ namespace GVFS.Hooks
                     RunWorktreePostCommand(args);
                     break;
             }
+
+            TrySendConeNarrow(args);
         }
 
         private static string ResolvePath(string path)

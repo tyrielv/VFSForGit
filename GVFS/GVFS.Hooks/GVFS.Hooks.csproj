@@ -29,6 +29,12 @@
     <Compile Include="..\GVFS.Common\Git\LibGit2RepoInvoker.cs">
       <Link>Common\Git\LibGit2RepoInvoker.cs</Link>
     </Compile>
+    <Compile Include="..\GVFS.Common\GitPathspecParser.cs">
+      <Link>Common\GitPathspecParser.cs</Link>
+    </Compile>
+    <Compile Include="..\GVFS.Common\ParsedGitCommand.cs">
+      <Link>Common\ParsedGitCommand.cs</Link>
+    </Compile>
     <Compile Include="..\GVFS.Common\GVFSConstants.cs">
       <Link>Common\GVFSConstants.cs</Link>
     </Compile>
@@ -46,6 +52,9 @@
     </Compile>
     <Compile Include="..\GVFS.Common\NamedPipes\UnstageNamedPipeMessages.cs">
       <Link>Common\NamedPipes\UnstageNamedPipeMessages.cs</Link>
+    </Compile>
+    <Compile Include="..\GVFS.Common\NamedPipes\ConeManagementNamedPipeMessages.cs">
+      <Link>Common\NamedPipes\ConeManagementNamedPipeMessages.cs</Link>
     </Compile>
     <Compile Include="..\GVFS.Common\NamedPipes\HydrationStatusNamedPipeMessages.cs">
       <Link>Common\NamedPipes\HydrationStatusNamedPipeMessages.cs</Link>
