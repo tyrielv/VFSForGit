@@ -40,6 +40,8 @@ namespace GVFS.CommandLine
 
         public bool NoPrefetch { get; set; }
 
+        public bool SparseIndex { get; set; }
+
         public string LocalCacheRoot { get; set; }
 
         public static System.CommandLine.Command CreateCommand()
@@ -92,6 +94,9 @@ namespace GVFS.CommandLine
             System.CommandLine.Option<bool> noPrefetchOption = new System.CommandLine.Option<bool>("--no-prefetch") { Description = "Use this option to not prefetch commits after clone" };
             cmd.Add(noPrefetchOption);
 
+            System.CommandLine.Option<bool> sparseIndexOption = new System.CommandLine.Option<bool>("--sparse-index") { Description = "Enable the built-in sparse index (gvfs.auto-sparse-index). The projection stays full; only the on-disk index is allowed to collapse. This is different from 'gvfs sparse', which narrows the projection." };
+            cmd.Add(sparseIndexOption);
+
             System.CommandLine.Option<string> localCacheOption = new System.CommandLine.Option<string>("--local-cache-path") { Description = "Use this option to override the path for the local GVFS cache." };
             cmd.Add(localCacheOption);
 
@@ -118,6 +123,7 @@ namespace GVFS.CommandLine
                 verb.SingleBranch = result.GetValue(singleBranchOption);
                 verb.NoMount = result.GetValue(noMountOption);
                 verb.NoPrefetch = result.GetValue(noPrefetchOption);
+                verb.SparseIndex = result.GetValue(sparseIndexOption);
                 verb.LocalCacheRoot = result.GetValue(localCacheOption);
 
                 GVFSVerb.ApplyInternalParameters(verb, result, internalOption);
@@ -693,7 +699,18 @@ namespace GVFS.CommandLine
                 return new Result(errorMessage);
             }
 
-            if (!GVFSVerb.TrySetRequiredGitConfigSettings(enlistment) ||
+            if (this.SparseIndex)
+            {
+                // Persist the feature flag before writing required config so that the sparse
+                // settings land in the same pass, and so that later mounts read it back.
+                GitProcess.Result setFlagResult = new GitProcess(enlistment).SetInLocalConfig(GVFSConstants.GitConfig.AutoSparseIndex, "true");
+                if (setFlagResult.ExitCodeIsFailure)
+                {
+                    return new Result("Unable to enable the sparse index: " + setFlagResult.Errors);
+                }
+            }
+
+            if (!GVFSVerb.TrySetRequiredGitConfigSettings(enlistment, this.SparseIndex) ||
                 !GVFSVerb.TrySetOptionalGitConfigSettings(enlistment))
             {
                 return new Result("Unable to configure git repo");

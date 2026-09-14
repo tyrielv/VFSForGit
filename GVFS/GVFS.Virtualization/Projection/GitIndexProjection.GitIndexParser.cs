@@ -237,7 +237,8 @@ namespace GVFS.Virtualization.Projection
                     throw new InvalidDataException(
                         $"Unsupported sparse index. Entry '{path}' is a sparse-directory entry (git index.sparse). " +
                         "This version of VFS for Git cannot project a sparse index. " +
-                        "To recover, unmount, run 'git sparse-checkout disable' to expand the index to full format, then mount again.");
+                        "To recover, run 'gvfs sparse-index --disable' from the enlistment. It unmounts if needed, " +
+                        "expands the index to full format, and clears the sparse-index config. Then run 'gvfs mount'.");
                 }
             }
 

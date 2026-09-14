@@ -101,7 +101,7 @@ namespace GVFS.UnitTests.Virtualization.Git
                 InvalidDataException error = Assert.Throws<InvalidDataException>(
                     () => GitIndexParser.ValidateIndex(new MockTracer(), stream));
 
-                error.Message.ShouldContain("sparse index", "GVFS/", "git sparse-checkout disable");
+                error.Message.ShouldContain("sparse index", "GVFS/", "gvfs sparse-index --disable");
             }
         }
 
