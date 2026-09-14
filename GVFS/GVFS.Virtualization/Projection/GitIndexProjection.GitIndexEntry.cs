@@ -49,6 +49,19 @@ namespace GVFS.Virtualization.Projection
             /// </summary>
             public int PathLength { get; set; }
             public byte[] PathBuffer { get; } = new byte[MaxPathBufferSize];
+
+            /// <summary>
+            /// True when the path ends in the git path separator ('/'). This is the on-disk
+            /// shape of a sparse-directory entry in a sparse index (git index.sparse). A normal
+            /// file or link entry never ends in a separator. Detection does not depend on
+            /// <see cref="FileTypeAndMode"/>, so it works on Windows, where the parser skips the
+            /// mode field.
+            /// </summary>
+            public bool PathEndsInSlash
+            {
+                get { return this.PathLength > 0 && this.PathBuffer[this.PathLength - 1] == PathSeparatorCode; }
+            }
+
             public FolderData BuildingProjection_LastParent { get; set; }
 
             // Only used when buildingNewProjection is true

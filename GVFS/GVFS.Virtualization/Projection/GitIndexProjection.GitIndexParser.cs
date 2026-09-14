@@ -108,6 +108,37 @@ namespace GVFS.Virtualization.Projection
                 return dirs.Count;
             }
 
+            /// <summary>
+            /// Parse an index and return the full path of every entry, in index order. This is a
+            /// test and diagnostic helper: it exercises the same v4 prefix-decompression path as
+            /// projection building, but without a <see cref="GitIndexProjection"/>. It reads the
+            /// raw path buffer, so a sparse-directory entry's trailing '/' is preserved. Use it to
+            /// verify that a trailing-slash entry does not corrupt the next entry's decompressed
+            /// path.
+            /// </summary>
+            internal static List<string> GetIndexPaths(ITracer tracer, Stream indexStream)
+            {
+                List<string> paths = new List<string>();
+                GitIndexParser indexParser = new GitIndexParser(null);
+
+                FileSystemTaskResult result = indexParser.ParseIndex(
+                    tracer,
+                    indexStream,
+                    indexParser.resuableProjectionBuildingIndexEntry,
+                    entry =>
+                    {
+                        paths.Add(Encoding.UTF8.GetString(entry.PathBuffer, 0, entry.PathLength));
+                        return FileSystemTaskResult.Success;
+                    });
+
+                if (result != FileSystemTaskResult.Success)
+                {
+                    throw new InvalidOperationException($"{nameof(GetIndexPaths)} failed: {result}");
+                }
+
+                return paths;
+            }
+
             public void RebuildProjection(ITracer tracer, Stream indexStream)
             {
                 if (this.projection == null)
@@ -182,7 +213,32 @@ namespace GVFS.Virtualization.Projection
                     throw new InvalidDataException("Zero-length path found in index");
                 }
 
+                FailIfSparseDirectoryEntry(data);
+
                 return FileSystemTaskResult.Success;
+            }
+
+            /// <summary>
+            /// Fail fast when the index contains a sparse-directory entry (git index.sparse
+            /// format). Such an entry has mode 040000, the skip-worktree bit, and a trailing '/'.
+            /// GVFS builds its projection from the index and cannot yet expand a sparse
+            /// directory's tree. If it accepted the entry it would create a folder with an empty
+            /// child name and crash the mount later during ProjFS enumeration, after the mount
+            /// reported the repository ready. Worse, that projection would silently omit every
+            /// collapsed subtree. Shutting down here, at parse time, avoids serving an incomplete
+            /// working directory. Detection uses the trailing '/', not the mode field, because
+            /// Windows skips mode parsing (SupportsFileMode is false).
+            /// </summary>
+            private static void FailIfSparseDirectoryEntry(GitIndexEntry data)
+            {
+                if (data.PathEndsInSlash)
+                {
+                    string path = Encoding.UTF8.GetString(data.PathBuffer, 0, data.PathLength);
+                    throw new InvalidDataException(
+                        $"Unsupported sparse index. Entry '{path}' is a sparse-directory entry (git index.sparse). " +
+                        "This version of VFS for Git cannot project a sparse index. " +
+                        "To recover, unmount, run 'git sparse-checkout disable' to expand the index to full format, then mount again.");
+                }
             }
 
             private FileSystemTaskResult AddIndexEntryToProjection(GitIndexEntry data)
@@ -190,6 +246,12 @@ namespace GVFS.Virtualization.Projection
                 // Never want to project the common ancestor even if the skip worktree bit is on
                 if ((data.MergeState != MergeStage.CommonAncestor && data.SkipWorktree) || data.MergeState == MergeStage.Yours)
                 {
+                    // A sparse-directory entry (git index.sparse) reaches this point because it
+                    // carries the skip-worktree bit. GVFS cannot expand its tree into the
+                    // projection yet, so fail fast before building a projection that omits the
+                    // collapsed subtree and crashes ProjFS enumeration.
+                    FailIfSparseDirectoryEntry(data);
+
                     data.BuildingProjection_ParsePath();
                     this.projection.AddItemFromIndexEntry(data);
                 }
@@ -329,6 +391,16 @@ namespace GVFS.Virtualization.Projection
                                 if (typeAndMode.Mode != 0)
                                 {
                                     throw new InvalidDataException($"Invalid file mode {typeAndMode.GetModeAsOctalString()} found for link file({typeAndMode.Type:X}) in index");
+                                }
+
+                                break;
+
+                            case FileType.Directory:
+                                // Sparse-directory entry (git index.sparse). Mode bits must be
+                                // zero; the entry carries a tree OID rather than file permissions.
+                                if (typeAndMode.Mode != 0)
+                                {
+                                    throw new InvalidDataException($"Invalid file mode {typeAndMode.GetModeAsOctalString()} found for sparse directory in index");
                                 }
 
                                 break;
