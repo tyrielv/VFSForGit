@@ -135,6 +135,10 @@ namespace GVFS.Virtualization.Projection
             Regular,
             SymLink,
             GitLink,
+
+            // Sparse-directory entry in a sparse index (git index.sparse). Mode 040000, a
+            // tree OID, and the skip-worktree bit. It stands in for a collapsed subtree.
+            Directory,
         }
 
         public enum PathSparseState
