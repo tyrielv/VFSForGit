@@ -12,7 +12,6 @@ namespace GVFS.Common.Git
         // when the gvfs.auto-sparse-index feature is enabled (see RequiredGitConfig), so that
         // git's is_sparse_index_allowed() lets the on-disk index collapse to cone entries.
         public const string CoreSparseCheckoutConeName = "core.sparseCheckoutCone";
-        public const string CoreSparseCheckoutName = "core.sparseCheckout";
         public const string IndexSparseName = "index.sparse";
         public const string SparseExpectFilesOutsideOfPatternsName = "sparse.expectFilesOutsideOfPatterns";
 
