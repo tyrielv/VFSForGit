@@ -23,12 +23,19 @@ namespace GVFS.Hooks
     /// </remarks>
     public partial class Program
     {
-        // Bounded so the hook never adds noticeable latency to Git. On timeout
-        // the widen is abandoned and Git proceeds; the result is only a
-        // transient in-memory index expansion, which is benign.
-        private const int ConeWidenTimeoutMs = 250;
-        private const int ConeNarrowTimeoutMs = 100;
-        private const int ConeConnectTimeoutMs = 50;
+        // Bounded so a fast widen never adds noticeable latency to Git: Task.Wait returns
+        // as soon as the mount replies, so these budgets are only spent when the mount is
+        // genuinely slow. On timeout the widen is abandoned and Git proceeds (fail-open):
+        // Git transiently expands the index and re-collapses it, so the on-disk index stays
+        // sparse and the result is correct -- but the optimization did not apply for that
+        // command. The mount decouples its O(repo) projection reparse from the reply, so
+        // this wait covers only the O(cone) on-disk index write; the widen budget can
+        // therefore be generous without penalizing fast widens. The budgets are shared with
+        // the mount, which warns when its apply time exceeds the budget so a breach is
+        // visible in the mount log rather than silent.
+        private const int ConeWidenTimeoutMs = GVFSConstants.ConeManagement.WidenHookWaitBudgetMs;
+        private const int ConeNarrowTimeoutMs = GVFSConstants.ConeManagement.NarrowHookWaitBudgetMs;
+        private const int ConeConnectTimeoutMs = GVFSConstants.ConeManagement.ConnectTimeoutMs;
 
         private static bool ConfigurationAllowsAutoSparseIndex()
         {
@@ -103,10 +110,15 @@ namespace GVFS.Hooks
 
         /// <summary>
         /// Sends a cone-management request and waits, bounded, for the mount's
-        /// reply. Any failure (no mount, timeout, exception, failure result) is
-        /// swallowed: cone management is best-effort and must never block Git.
+        /// reply. Returns whether the mount confirmed the cone was applied within the
+        /// budget. Any failure (no mount, timeout, exception, failure result) returns
+        /// false and is swallowed by the caller: cone management is best-effort and must
+        /// never block Git. The outcome is captured rather than discarded; when it is
+        /// false the cone was not confirmed applied before Git ran, and the mount records
+        /// that breach as a warning in its log (it knows the same budget and its own
+        /// apply duration).
         /// </summary>
-        private static void SendConeRequestBounded(string header, string body, int timeoutMilliseconds)
+        private static bool SendConeRequestBounded(string header, string body, int timeoutMilliseconds)
         {
             try
             {
@@ -125,13 +137,19 @@ namespace GVFS.Hooks
                     }
                 });
 
-                // Hard outer bound. If the mount stalls, abandon the orphaned
-                // task — the hook process exits immediately after this returns.
-                task.Wait(timeoutMilliseconds);
+                // Hard outer bound. If the mount stalls, abandon the orphaned task -- the
+                // hook process exits immediately after this returns. Capture the outcome,
+                // matching the cached-hydration-status precedent (Program.cs): the task must
+                // complete within the budget, run to completion (not fault or cancel), and
+                // report a success reply for the cone to be confirmed applied.
+                return task.Wait(timeoutMilliseconds)
+                    && task.Status == TaskStatus.RanToCompletion
+                    && task.Result;
             }
             catch (Exception)
             {
                 // Best-effort: never block or fail Git for cone management.
+                return false;
             }
         }
     }

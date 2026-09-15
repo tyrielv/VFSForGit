@@ -28,13 +28,21 @@ namespace GVFS.Mount
     /// <para>
     /// Concurrency: all cone operations run under a single process-internal lock, in the
     /// order coneLock -> atomic sparse-checkout file write -> git's own index.lock (held
-    /// only inside the child git) -> projection reparse (which takes the projection
-    /// read/write lock on the parse thread inside <see cref="FileSystemCallbacks.ForceIndexProjectionUpdate"/>).
-    /// The handler deliberately does NOT take the GVFS lock: the pre-command hook already
-    /// holds it for the commands that widen (add, rm, restore, stash, reset -- &lt;path&gt;),
-    /// so acquiring it here would deadlock the very command that is waiting on the reply.
-    /// The collapse git process disables every GVFS hook, so it never re-enters the mount
-    /// pipe. See decisions/0019.
+    /// only inside the child git) -> a projection-reparse trigger. The reparse itself is
+    /// NOT waited for on the reply path: <see cref="FileSystemCallbacks.RequestIndexProjectionUpdate"/>
+    /// invalidates the projection and the background index-parsing thread rebuilds it
+    /// asynchronously (the same machinery every other index change uses). Git only needs
+    /// the on-disk index widened -- which the collapse does before the reply -- to avoid a
+    /// full expansion; the projected set is the full HEAD tree regardless of the cone, so a
+    /// widen never changes what ProjFS projects and the reparse only reconciles GVFS-internal
+    /// state. Keeping the O(repo) reparse off the reply path is what keeps the hook's bounded
+    /// wait covering only the O(cone) index write. The handler never holds
+    /// projectionReadWriteLock itself and never opens the index for read, so it does not
+    /// fight the index-parsing thread. The handler deliberately does NOT take the GVFS lock:
+    /// the pre-command hook already holds it for the commands that widen (add, rm, restore,
+    /// stash, reset -- &lt;path&gt;), so acquiring it here would deadlock the very command that
+    /// is waiting on the reply. The collapse git process disables every GVFS hook, so it
+    /// never re-enters the mount pipe. See decisions/0019 and decisions/0021.
     /// </para>
     /// </remarks>
     public class AutoSparseIndexConeManager
@@ -70,7 +78,9 @@ namespace GVFS.Mount
         /// <summary>
         /// Widen the cone to cover the paths a Git command names, then reply. The hook
         /// blocks on this, so latency is user-visible: it is paid on every command that
-        /// names an out-of-cone path.
+        /// names an out-of-cone path. The reply is sent as soon as the on-disk index is
+        /// widened; the projection reparse is triggered but not waited for, so the wait
+        /// covers only the O(cone) index write, not the O(repo) reparse.
         /// </summary>
         public bool TryWiden(NamedPipeMessages.ConeManagement.WidenParameters parameters, out string error)
         {
@@ -82,7 +92,7 @@ namespace GVFS.Mount
             try
             {
                 this.transientState.AddPaths(parameters.SessionId, requestedPaths);
-                return this.ApplyCurrentCone(nameof(this.TryWiden), requestedPaths.Count, out error);
+                return this.ApplyCurrentCone(nameof(this.TryWiden), requestedPaths.Count, GVFSConstants.ConeManagement.WidenHookWaitBudgetMs, blocksGitCommand: true, out error);
             }
             catch (Exception e) when (e is not OutOfMemoryException)
             {
@@ -115,7 +125,7 @@ namespace GVFS.Mount
                     return true;
                 }
 
-                return this.ApplyCurrentCone(nameof(this.TryNarrow), 0, out error);
+                return this.ApplyCurrentCone(nameof(this.TryNarrow), 0, GVFSConstants.ConeManagement.NarrowHookWaitBudgetMs, blocksGitCommand: false, out error);
             }
             catch (Exception e) when (e is not OutOfMemoryException)
             {
@@ -181,7 +191,7 @@ namespace GVFS.Mount
             }
         }
 
-        private bool ApplyCurrentCone(string caller, int requestedPathCount, out string error)
+        private bool ApplyCurrentCone(string caller, int requestedPathCount, int hookWaitBudgetMs, bool blocksGitCommand, out string error)
         {
             error = null;
 
@@ -192,12 +202,13 @@ namespace GVFS.Mount
 
             ConePatternSet cone = ConeBuilder.BuildFromModifiedPaths(allPaths);
             string newContent = ConeFileWriter.Serialize(cone);
+            double coneBuildMs = stopwatch.Elapsed.TotalMilliseconds;
 
             if (this.ConeContentUnchanged(newContent))
             {
                 // The cone already covers these paths, so there is nothing to write and no
                 // projection rebuild to trigger. Current behaviour is byte-for-byte unchanged.
-                this.TraceApplied(caller, requestedPathCount, changed: false, stopwatch);
+                this.TraceApplied(caller, requestedPathCount, changed: false, hookWaitBudgetMs, blocksGitCommand, stopwatch, coneBuildMs, writeMs: 0, collapseMs: 0);
                 return true;
             }
 
@@ -210,6 +221,8 @@ namespace GVFS.Mount
                 return false;
             }
 
+            double writeMs = stopwatch.Elapsed.TotalMilliseconds - coneBuildMs;
+
             GitProcess.Result collapseResult = this.git.ForceCollapseSparseIndex();
             if (collapseResult.ExitCodeIsFailure)
             {
@@ -218,12 +231,21 @@ namespace GVFS.Mount
                 return false;
             }
 
-            // The collapse rewrote the index with hooks disabled, so the mount received no
-            // PostIndexChanged notification. Reparse the projection so the GVFS view matches
-            // the new on-disk cone before replying. The modified-paths set is unchanged.
-            this.fileSystemCallbacks.ForceIndexProjectionUpdate(invalidateProjection: true, invalidateModifiedPaths: false);
+            double collapseMs = stopwatch.Elapsed.TotalMilliseconds - coneBuildMs - writeMs;
 
-            this.TraceApplied(caller, requestedPathCount, changed: true, stopwatch);
+            // The collapse rewrote the on-disk index with hooks disabled, so the mount got no
+            // PostIndexChanged notification. Trigger a projection reparse to reconcile the
+            // GVFS view with the new on-disk cone -- but do NOT wait for it. Git only needs
+            // the on-disk index widened (done above) to avoid a full expansion; the reparse
+            // is GVFS-internal and the projected set is the full HEAD tree regardless of the
+            // cone, so a widen never changes what ProjFS projects. Waiting for the reparse
+            // would put its O(repo) cost (seconds at os.2020 scale) on the hook's reply path
+            // and blow the wait budget; the background index-parsing thread rebuilds the
+            // projection asynchronously, exactly as it does for any other index change. The
+            // modified-paths set is unchanged.
+            this.fileSystemCallbacks.RequestIndexProjectionUpdate(invalidateProjection: true, invalidateModifiedPaths: false);
+
+            this.TraceApplied(caller, requestedPathCount, changed: true, hookWaitBudgetMs, blocksGitCommand, stopwatch, coneBuildMs, writeMs, collapseMs);
             return true;
         }
 
@@ -272,16 +294,55 @@ namespace GVFS.Mount
             this.tracer.RelatedError(metadata, $"{caller}: ForceCollapseSparseIndex failed");
         }
 
-        private void TraceApplied(string caller, int requestedPathCount, bool changed, Stopwatch stopwatch)
+        private void TraceApplied(
+            string caller,
+            int requestedPathCount,
+            bool changed,
+            int hookWaitBudgetMs,
+            bool blocksGitCommand,
+            Stopwatch stopwatch,
+            double coneBuildMs,
+            double writeMs,
+            double collapseMs)
         {
             stopwatch.Stop();
+            double durationMs = stopwatch.Elapsed.TotalMilliseconds;
+
             EventMetadata metadata = this.CreateEventMetadata();
             metadata.Add("RequestedPathCount", requestedPathCount);
             metadata.Add("TransientSessionCount", this.transientState.SessionCount);
             metadata.Add("ConeChanged", changed);
-            metadata.Add("DurationMs", stopwatch.Elapsed.TotalMilliseconds);
+
+            // DurationMs is the hook-blocking portion only (cone build + sparse-checkout
+            // write + in-place index collapse + reparse trigger). It excludes the projection
+            // reparse, which now runs asynchronously on the background parse thread.
+            metadata.Add("DurationMs", durationMs);
+            metadata.Add("ConeBuildMs", coneBuildMs);
+            metadata.Add("WriteMs", writeMs);
+            metadata.Add("CollapseMs", collapseMs);
+            metadata.Add("HookWaitBudgetMs", hookWaitBudgetMs);
             metadata.Add(TracingConstants.MessageKey.InfoMessage, $"{caller}: Applied cone");
             this.tracer.RelatedEvent(EventLevel.Informational, $"{caller}_Applied", metadata);
+
+            if (blocksGitCommand && changed && durationMs > hookWaitBudgetMs)
+            {
+                // The pre-command widen outran the hook's wait budget, so the hook abandoned
+                // the wait and let Git run before the cone was confirmed applied. This is
+                // correctness-safe (Git transiently expands and re-collapses the index), but
+                // the "block Git until the cone is applied" guarantee did not hold this time.
+                // Surface it as a warning so the soft-guarantee breach is visible in the mount
+                // log rather than silent. Only the pre-command widen blocks Git, so only it
+                // warns; the post-command narrow exceeding its budget is expected and benign
+                // (Git already ran; a late narrow only defers shrinking the cone).
+                EventMetadata warning = this.CreateEventMetadata();
+                warning.Add("DurationMs", durationMs);
+                warning.Add("CollapseMs", collapseMs);
+                warning.Add("HookWaitBudgetMs", hookWaitBudgetMs);
+                warning.Add(
+                    TracingConstants.MessageKey.WarningMessage,
+                    $"{caller}: Cone apply took {durationMs:F1} ms, over the hook's {hookWaitBudgetMs} ms wait budget; Git may have proceeded before the cone was applied and transiently expanded the index.");
+                this.tracer.RelatedEvent(EventLevel.Warning, $"{caller}_ExceededHookBudget", warning);
+            }
         }
 
         private EventMetadata CreateEventMetadata()
