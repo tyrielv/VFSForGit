@@ -254,6 +254,19 @@ namespace GVFS.Hooks
                 case "gui":
                     ExitWithError(GVFSHooksPlatform.GetGitGuiBlockedMessage());
                     break;
+
+                case SparseCheckoutCommandGuard.SparseCheckoutCommand:
+                    // Only read the feature flag for a git sparse-checkout command, so the
+                    // common per-command hook path (ADR 0002 startup budget) is untouched.
+                    if (SparseCheckoutCommandGuard.TryGetBlockMessage(
+                            args,
+                            ConfigurationAllowsAutoSparseIndex(),
+                            out string sparseCheckoutBlockMessage))
+                    {
+                        ExitWithError(sparseCheckoutBlockMessage);
+                    }
+
+                    break;
             }
         }
 

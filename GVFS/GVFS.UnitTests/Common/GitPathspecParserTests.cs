@@ -442,5 +442,62 @@ namespace GVFS.UnitTests.Common
             result.Command.ShouldEqual("commit");
             result.Pathspecs.ShouldMatchInOrder("src/a.cs", "src/b.cs");
         }
+
+        // ── Subcommand extraction (sparse-checkout, stash, ...) ─────────
+
+        [TestCase]
+        public void Subcommand_IsFirstPositional()
+        {
+            GitPathspecParser.ParseHookArgs(new[] { "pre-command", "sparse-checkout", "set", "a/", "b/" })
+                .Subcommand.ShouldEqual("set");
+            GitPathspecParser.ParseHookArgs(new[] { "pre-command", "sparse-checkout", "reapply" })
+                .Subcommand.ShouldEqual("reapply");
+            GitPathspecParser.ParseHookArgs(new[] { "pre-command", "stash", "push", "f.txt" })
+                .Subcommand.ShouldEqual("push");
+        }
+
+        [TestCase]
+        public void Subcommand_NullWhenCommandNamesNoPositional()
+        {
+            GitPathspecParser.ParseHookArgs(new[] { "pre-command", "sparse-checkout" })
+                .Subcommand.ShouldBeNull();
+        }
+
+        [TestCase]
+        public void Subcommand_IsCaseSensitiveAndNotLowercased()
+        {
+            // Git subcommand dispatch is case-sensitive, so the raw token is preserved.
+            GitPathspecParser.ParseHookArgs(new[] { "pre-command", "sparse-checkout", "SET" })
+                .Subcommand.ShouldEqual("SET");
+        }
+
+        [TestCase]
+        public void Subcommand_SkipsLeadingOptions()
+        {
+            // A leading option is not a positional, so the subcommand is the first
+            // non-option token.
+            GitPathspecParser.ParseHookArgs(new[] { "pre-command", "sparse-checkout", "--stdin", "set" })
+                .Subcommand.ShouldEqual("set");
+        }
+
+        [TestCase]
+        public void Subcommand_ResolvesPastGlobalOptions()
+        {
+            // git -C <dir> sparse-checkout set — the global -C run is consumed first, so
+            // the subcommand still resolves.
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "-C", "sub/dir", "sparse-checkout", "set", "a/" });
+            result.Command.ShouldEqual("sparse-checkout");
+            result.Subcommand.ShouldEqual("set");
+            result.ChangeDirectory.ShouldEqual("sub/dir");
+        }
+
+        [TestCase]
+        public void Subcommand_NullWhenTokenIsAfterDashDash()
+        {
+            // A token after "--" is a literal argument, not a subcommand.
+            GitPathspecParser.ParseHookArgs(new[] { "pre-command", "sparse-checkout", "--", "set" })
+                .Subcommand.ShouldBeNull();
+        }
     }
 }
