@@ -13,6 +13,24 @@ namespace GVFS.Common.Git
 {
     public class GitProcess : ICredentialStore
     {
+        /// <summary>
+        /// The exact line emitted by 'git version --build-options' when the git build carries the
+        /// VFS for Git sparse-index changes. Stock git omits it. Match it anchored, one line. Both
+        /// 'gvfs clone --sparse-index' and 'gvfs sparse-index --enable' probe for this line and
+        /// fail fast when it is absent. See decisions/0018.
+        /// </summary>
+        public const string VfsSparseIndexCapabilityLine = "feature: vfs-sparse-index";
+
+        /// <summary>
+        /// The user-facing error when the configured git does not advertise the sparse-index
+        /// capability. Shared by every entry point that gates on the capability so the message
+        /// does not diverge.
+        /// </summary>
+        public const string MissingVfsSparseIndexCapabilityError =
+            "The sparse index requires a git build with VFS for Git sparse-index support. " +
+            "The configured git does not advertise 'feature: vfs-sparse-index' in " +
+            "'git version --build-options'. Install a git build that includes these changes, then retry.";
+
         private const int HResultEHANDLE = -2147024890; // 0x80070006 E_HANDLE
 
         /// <summary>
@@ -161,6 +179,56 @@ namespace GVFS.Common.Git
 
             error = null;
             return true;
+        }
+
+        /// <summary>
+        /// Determines whether the given git build advertises VFS for Git sparse-index support.
+        /// A capable build emits the line 'feature: vfs-sparse-index' under
+        /// 'git version --build-options'; stock git omits it. This capability is the hard
+        /// prerequisite for sparse-index mode: without it, git re-expands the index in-process
+        /// during a checkout under core.virtualfilesystem and silently writes a FULL index, so
+        /// 'gvfs clone --sparse-index' and 'gvfs sparse-index --enable' must fail fast when the
+        /// probe returns false. See decisions/0018 (the capability) and decisions/0015 (why the
+        /// feature depends on it).
+        /// </summary>
+        /// <remarks>
+        /// Probe the git that GVFS is configured to use (an enlistment's GitBinPath), never a
+        /// hardcoded path: the user may have several git installs, and only the configured one is
+        /// the git GVFS actually runs.
+        /// </remarks>
+        public static bool SupportsVfsSparseIndex(string gitBinPath)
+        {
+            GitProcess gitProcess = new GitProcess(gitBinPath, null);
+            Result result = gitProcess.InvokeGitOutsideEnlistment("version --build-options");
+            if (result.ExitCodeIsFailure)
+            {
+                return false;
+            }
+
+            return HasVfsSparseIndexCapability(result.Output);
+        }
+
+        /// <summary>
+        /// Parses the output of 'git version --build-options' and returns true when it contains a
+        /// line equal to 'feature: vfs-sparse-index' (anchored, one line). Separated from the git
+        /// spawn so it can be unit-tested without a git binary.
+        /// </summary>
+        public static bool HasVfsSparseIndexCapability(string buildOptionsOutput)
+        {
+            if (string.IsNullOrEmpty(buildOptionsOutput))
+            {
+                return false;
+            }
+
+            foreach (string line in buildOptionsOutput.Split('\n'))
+            {
+                if (line.Trim().Equals(VfsSparseIndexCapabilityLine, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -968,6 +1036,42 @@ namespace GVFS.Common.Git
                 workingDirectory: this.workingDirectoryRoot,
                 dotGitDirectory: null,
                 useReadObjectHook: true,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false);
+        }
+
+        /// <summary>
+        /// Collapses the on-disk index to a sparse index in place, without walking the
+        /// working tree. This is the mirror of <see cref="ForceExpandSparseIndex"/> and is
+        /// used at clone time to construct a sparse index directly from the freshly written
+        /// full index, so the enlistment is already sparse before its first mount.
+        /// </summary>
+        /// <remarks>
+        /// Must run with GVFS unmounted, so every GVFS hook is neutralized:
+        ///   -c core.virtualfilesystem=   disables the VFS hook, which otherwise blocks on a
+        ///                                named pipe to a mount that is not running.
+        ///   -c core.hookspath=           disables the GVFS pre-command hook, which aborts git
+        ///                                commands when the mount is down.
+        ///   -c index.sparse=true         forces git to write a sparse (collapsed) index.
+        ///   -c sparse.expectFilesOutsideOfPatterns=true  keeps clear_skip_worktree_from_present_files
+        ///                                from clearing skip-worktree on the present files that
+        ///                                VFS for Git keeps outside the cone; without it, disabling
+        ///                                VFS re-expands the index (see decisions/0001).
+        /// --force-write-index makes git rewrite the index even though no tracked content
+        /// changed; convert_to_sparse collapses the out-of-cone directories in place. Unlike
+        /// sparse-checkout reapply, this does not iterate the working tree, so it stays cheap
+        /// at scale. On a freshly cloned index (skip-worktree set on every entry, valid
+        /// cache-tree) it collapses to the minimal cone. See decisions/0015.
+        /// </remarks>
+        public Result CollapseSparseIndex()
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.CoreVirtualFileSystemName + "= -c core.hookspath= -c " + GitConfigSetting.SparseExpectFilesOutsideOfPatternsName + "=true -c " + GitConfigSetting.IndexSparseName + "=true update-index --force-write-index",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: false,
                 writeStdIn: null,
                 parseStdOutLine: null,
                 timeoutMs: -1,
