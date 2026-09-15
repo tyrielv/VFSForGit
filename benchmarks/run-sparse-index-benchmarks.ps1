@@ -38,7 +38,7 @@ param(
     [string]$OutsideConePath = '',
 
     [string[]]$Operations = @(
-        'status-cache', 'status-no-cache', 'merge', 'rebase', 'cherry-pick',
+        'status-cache', 'status-no-cache', 'merge', 'rebase', 'cherry-pick', 'revert',
         'add', 'commit', 'reset', 'checkout-branch', 'checkout-noop',
         'checkout-path', 'switch', 'stash', 'diff', 'log', 'blame', 'clean'
     )
@@ -55,7 +55,7 @@ $Operations = @(
 )
 
 $supportedOperations = @(
-    'status-cache', 'status-no-cache', 'merge', 'rebase', 'cherry-pick',
+    'status-cache', 'status-no-cache', 'merge', 'rebase', 'cherry-pick', 'revert',
     'add', 'commit', 'reset', 'checkout-branch', 'checkout-noop',
     'checkout-path', 'switch', 'stash', 'diff', 'log', 'blame', 'clean'
 )
@@ -660,6 +660,12 @@ function Prepare-Operation([string]$Operation, [int]$Iteration) {
         'cherry-pick' {
             Restore-Base
         }
+        'revert' {
+            # Revert undoes a commit that is already in history, so unlike cherry-pick it
+            # needs no foreign commit. Reverting the base tip touches exactly the paths that
+            # commit touched, which is what decides whether the index has to expand.
+            Restore-Base
+        }
         { $_ -in @('add', 'checkout-path', 'stash', 'diff') } {
             Restore-Base
             Add-TrackedFileChange -Iteration $Iteration
@@ -705,6 +711,7 @@ function Get-OperationArguments([string]$Operation, [int]$Iteration) {
         'merge'           { return @('-C', $Repo, 'merge', '--no-commit', '--no-ff', $mergeCommit) }
         'rebase'          { return @('-C', $Repo, '-c', 'user.name=Sparse Index Benchmark', '-c', 'user.email=benchmark@example.invalid', 'rebase', '--onto', $ontoCommit, $baseCommit) }
         'cherry-pick'     { return @('-C', $Repo, 'cherry-pick', '--no-commit', $mergeCommit) }
+        'revert'          { return @('-C', $Repo, 'revert', '--no-commit', 'HEAD') }
         'add'             { return @('-C', $Repo, 'add', '--', $benchmarkTrackedPath) }
         'commit'          { return @('-C', $Repo, '-c', 'user.name=Sparse Index Benchmark', '-c', 'user.email=benchmark@example.invalid', 'commit', '--no-gpg-sign', '-m', 'Sparse index benchmark commit') }
         'reset'           { return @('-C', $Repo, 'reset', '--mixed', 'HEAD') }
@@ -752,6 +759,13 @@ function Cleanup-Iteration([string]$Operation) {
         (Test-Path -LiteralPath (Join-Path $Repo '.git\rebase-apply'))) {
         Invoke-CleanupStep -Description 'Abort rebase' -Action {
             Invoke-SetupGit -Arguments @('-C', $Repo, 'rebase', '--abort') -Label 'cleanup-rebase'
+        }
+    }
+    # Revert must be checked before cherry-pick: both use .git/sequencer, so the
+    # cherry-pick branch below would otherwise try to abort a revert with the wrong verb.
+    if (-not [string]::IsNullOrWhiteSpace((Get-GitRef -Ref 'REVERT_HEAD'))) {
+        Invoke-CleanupStep -Description 'Abort revert' -Action {
+            Invoke-SetupGit -Arguments @('-C', $Repo, 'revert', '--abort') -Label 'cleanup-revert'
         }
     }
     if (-not [string]::IsNullOrWhiteSpace((Get-GitRef -Ref 'CHERRY_PICK_HEAD')) -or
