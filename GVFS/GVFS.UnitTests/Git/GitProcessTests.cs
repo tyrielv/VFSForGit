@@ -144,6 +144,56 @@ namespace GVFS.UnitTests.Git
         }
 
         [TestCase]
+        public void HasVfsSparseIndexCapability_TrueWhenLinePresent()
+        {
+            string buildOptions =
+                "git version 2.55.0.vfs.0.8.10.gd332ac45f5\n" +
+                "cpu: x86_64\n" +
+                "feature: fsmonitor--daemon\n" +
+                "feature: vfs-sparse-index\n";
+
+            GitProcess.HasVfsSparseIndexCapability(buildOptions).ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_TrueWithWindowsLineEndings()
+        {
+            string buildOptions =
+                "git version 2.55.0.vfs.0.8.10\r\n" +
+                "feature: fsmonitor--daemon\r\n" +
+                "feature: vfs-sparse-index\r\n";
+
+            GitProcess.HasVfsSparseIndexCapability(buildOptions).ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_FalseWhenLineAbsent()
+        {
+            // Stock git build options: no vfs-sparse-index feature line.
+            string buildOptions =
+                "git version 2.55.0.vfs.0.8\n" +
+                "cpu: x86_64\n" +
+                "feature: fsmonitor--daemon\n";
+
+            GitProcess.HasVfsSparseIndexCapability(buildOptions).ShouldBeFalse();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_FalseForNearMissLines()
+        {
+            // The match is anchored to the whole line; a longer or embedded token must not match.
+            GitProcess.HasVfsSparseIndexCapability("feature: vfs-sparse-index-experimental\n").ShouldBeFalse();
+            GitProcess.HasVfsSparseIndexCapability("xfeature: vfs-sparse-index\n").ShouldBeFalse();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_FalseForEmptyOrNull()
+        {
+            GitProcess.HasVfsSparseIndexCapability(null).ShouldBeFalse();
+            GitProcess.HasVfsSparseIndexCapability(string.Empty).ShouldBeFalse();
+        }
+
+        [TestCase]
         public void ResultHasNoErrors()
         {
             GitProcess.Result result = new GitProcess.Result(

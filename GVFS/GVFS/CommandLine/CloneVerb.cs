@@ -249,6 +249,16 @@ namespace GVFS.CommandLine
                         CacheServerResolver cacheServerResolver = new CacheServerResolver(tracer, enlistment);
                         cacheServer = cacheServerResolver.ParseUrlOrFriendlyName(this.CacheServerUrl);
 
+                        // Fail fast, before any network work, when the user asked for a sparse index
+                        // but the configured git cannot produce one. Without the VFS sparse-index
+                        // capability, git re-expands the index during checkout and silently writes a
+                        // FULL index (ADR 0015 / 0018) - the user must be told they need a capable git,
+                        // not left with a silently non-sparse enlistment.
+                        if (this.SparseIndex && !GitProcess.SupportsVfsSparseIndex(enlistment.GitBinPath))
+                        {
+                            this.ReportErrorAndExit(tracer, GitProcess.MissingVfsSparseIndexCapabilityError);
+                        }
+
                         string resolvedLocalCacheRoot;
                         if (string.IsNullOrWhiteSpace(this.LocalCacheRoot))
                         {
@@ -754,6 +764,23 @@ namespace GVFS.CommandLine
                 return new Result(installHooksError);
             }
 
+            if (this.SparseIndex)
+            {
+                // Establish the minimal cone and cone-mode sparse checkout BEFORE the checkout, so a
+                // capable git checks out sparsely from the start: it materializes only in-cone (root)
+                // paths and writes a sparse index directly - no full 206 MB index write, and no
+                // post-hoc collapse. The other three sparse keys (core.sparseCheckoutCone,
+                // index.sparse, sparse.expectFilesOutsideOfPatterns) were already written above by
+                // TrySetRequiredGitConfigSettings. The capability gate in Execute guarantees the git
+                // reaching this checkout advertises 'feature: vfs-sparse-index', which is what makes
+                // the checkout write sparse instead of re-expanding. See decisions/0015.
+                if (!this.TryWriteInitialSparseCone(enlistment, git, fileSystem, out errorMessage))
+                {
+                    tracer.RelatedError(errorMessage);
+                    return new Result(errorMessage);
+                }
+            }
+
             GitProcess.Result forceCheckoutResult = git.ForceCheckout(branch);
             if (forceCheckoutResult.ExitCodeIsFailure && forceCheckoutResult.Errors.IndexOf("unable to read tree") > 0)
             {
@@ -801,24 +828,13 @@ namespace GVFS.CommandLine
 
             if (this.SparseIndex)
             {
-                // The full index is now written. Collapse it to a sparse index in place so the
-                // enlistment is already sparse before its first mount, instead of paying the
-                // one-time collapse of a large full index later. See decisions/0015.
-                //
-                // The collapse runs AFTER the checkout, not before, so this path is robust to the
-                // git version. Setting the cone and core.sparseCheckout BEFORE ForceCheckout makes
-                // git construct a sparse index directly ONLY with a git whose virtualfilesystem is
-                // sparse-index aware (does not force-expand under core.virtualfilesystem). With a
-                // git that lacks that fix (ADR 0001 blocker G-a), the checkout re-expands the index
-                // in-process and writes a FULL index, which this collapse can then no longer reduce
-                // (measured: 7 -> 7). A clean GVFS checkout (sparse-checkout off) followed by this
-                // collapse (VFS disabled) produces a sparse index with BOTH git versions. See
-                // decisions/0015 "Alternative: cone before checkout" for the full matrix.
-                if (!this.TryConstructSparseIndex(tracer, enlistment, git, fileSystem, out errorMessage))
-                {
-                    tracer.RelatedError(errorMessage);
-                    return new Result(errorMessage);
-                }
+                // The checkout ran with the cone and cone-mode sparse checkout already active, so a
+                // capable git wrote a sparse index directly - there is no collapse step. Record the
+                // result. A repository with no out-of-cone directories legitimately has nothing to
+                // collapse, so a non-sparse index here is a warning, not a failure; the functional
+                // test asserts sparseness against a repository that does have collapsible
+                // directories. See decisions/0015.
+                this.LogClonedSparseIndex(tracer, enlistment);
             }
 
             if (!RepoMetadata.TryInitialize(tracer, enlistment.DotGVFSRoot, out errorMessage))
@@ -863,34 +879,29 @@ namespace GVFS.CommandLine
 
         // TODO(#1364): Don't call this method on POSIX platforms (or have it no-op on them)
         /// <summary>
-        /// Construct a sparse index directly at clone time so the enlistment is already sparse
-        /// before its first mount, instead of paying the one-time collapse of a large full index
-        /// later.
+        /// Write the minimal cone and enable cone-mode sparse checkout BEFORE the clone's checkout,
+        /// so a capable git constructs a sparse index directly during checkout - the enlistment is
+        /// already sparse before its first mount, with no full-index write and no post-hoc collapse.
         /// </summary>
         /// <remarks>
-        /// A fresh clone has no modified paths, so the natural starting cone is minimal: root
-        /// files only ("/*", "!/*/"). The steps are:
-        ///   1. Build the minimal cone (empty modified-path set) with W6's ConeBuilder and write
-        ///      it to the per-worktree info/sparse-checkout in git's exact cone format.
-        ///   2. Set core.sparseCheckout=true so git applies the cone when it rewrites the index.
-        ///      The three sparse-index keys (core.sparseCheckoutCone, index.sparse,
+        /// A fresh clone has no modified paths, so the natural starting cone is minimal: root files
+        /// only ("/*", "!/*/"). The steps are:
+        ///   1. Build the minimal cone (empty modified-path set) with W6's ConeBuilder and write it
+        ///      to the per-worktree info/sparse-checkout in git's exact cone format.
+        ///   2. Set core.sparseCheckout=true so git applies the cone when it builds the index during
+        ///      checkout. The three sparse-index keys (core.sparseCheckoutCone, index.sparse,
         ///      sparse.expectFilesOutsideOfPatterns) are already written by
         ///      TrySetRequiredGitConfigSettings when SparseIndex is true.
-        ///   3. Collapse the just-written full index in place with 'update-index
-        ///      --force-write-index' (GVFS hooks disabled). This is cheap because the fresh index
-        ///      has skip-worktree on every entry and a valid cache-tree, so git collapses every
-        ///      out-of-cone directory without walking the working tree.
-        /// See decisions/0015 for why direct construction during checkout is infeasible with
-        /// stock git, and why 'update-index --force-write-index' is used instead of
-        /// 'sparse-checkout reapply'.
+        /// The checkout must run a git that advertises 'feature: vfs-sparse-index'; Execute gates on
+        /// that capability and fails fast otherwise. With a git that lacks the fix (ADR 0001 blocker
+        /// G-a), the checkout re-expands the index in-process and writes a FULL index that cannot be
+        /// collapsed afterward (measured: 7 -> 7 - see decisions/0015), which is exactly why the gate
+        /// is a hard prerequisite. See decisions/0015 "Alternative: cone before checkout" for the
+        /// full matrix.
         /// </remarks>
-        private bool TryConstructSparseIndex(ITracer tracer, GVFSEnlistment enlistment, GitProcess git, PhysicalFileSystem fileSystem, out string errorMessage)
+        private bool TryWriteInitialSparseCone(GVFSEnlistment enlistment, GitProcess git, PhysicalFileSystem fileSystem, out string errorMessage)
         {
             errorMessage = null;
-
-            GitIndexInfo before;
-            string beforeError;
-            bool readBefore = GitIndexInspector.TryReadIndexInfo(enlistment.GitIndexPath, out before, out beforeError);
 
             // 1. A fresh clone has no modified paths, so the minimal cone is root files only.
             ConePatternSet cone = ConeBuilder.BuildFromModifiedPaths(Array.Empty<string>());
@@ -903,7 +914,7 @@ namespace GVFS.CommandLine
                 return false;
             }
 
-            // 2. Enable cone-mode sparse checkout so git applies the cone when it rewrites the index.
+            // 2. Enable cone-mode sparse checkout so git applies the cone when it builds the index.
             GitProcess.Result setSparseCheckout = git.SetInLocalConfig(GitConfigSetting.CoreSparseCheckoutName, "true");
             if (setSparseCheckout.ExitCodeIsFailure)
             {
@@ -911,43 +922,36 @@ namespace GVFS.CommandLine
                 return false;
             }
 
-            // 3. Collapse the full index to a sparse index in place, with the GVFS hooks disabled.
-            GitProcess.Result collapseResult = git.CollapseSparseIndex();
-            if (collapseResult.ExitCodeIsFailure)
-            {
-                errorMessage = "Unable to collapse the index to a sparse index: " + collapseResult.Errors;
-                return false;
-            }
+            return true;
+        }
 
-            GitIndexInfo after;
-            string afterError;
-            if (GitIndexInspector.TryReadIndexInfo(enlistment.GitIndexPath, out after, out afterError))
+        /// <summary>
+        /// Read and record the on-disk index after a clone-time sparse checkout. The checkout with
+        /// the cone active already produced a sparse index (a capable git is guaranteed by the
+        /// Execute gate), so this only observes and warns - it never fails or rewrites the index. A
+        /// repository with no out-of-cone directories legitimately yields a non-sparse index.
+        /// </summary>
+        private void LogClonedSparseIndex(ITracer tracer, GVFSEnlistment enlistment)
+        {
+            GitIndexInfo indexInfo;
+            string readError;
+            if (GitIndexInspector.TryReadIndexInfo(enlistment.GitIndexPath, out indexInfo, out readError))
             {
                 EventMetadata metadata = new EventMetadata();
-                metadata.Add("IsSparse", after.IsSparse);
-                metadata.Add("EntryCount", after.EntryCount);
-                metadata.Add("SizeInBytes", after.SizeInBytes);
-                if (readBefore)
-                {
-                    metadata.Add("EntryCountBefore", before.EntryCount);
-                    metadata.Add("SizeInBytesBefore", before.SizeInBytes);
-                }
-
+                metadata.Add("IsSparse", indexInfo.IsSparse);
+                metadata.Add("EntryCount", indexInfo.EntryCount);
+                metadata.Add("SizeInBytes", indexInfo.SizeInBytes);
                 tracer.RelatedEvent(EventLevel.Informational, "SparseIndexConstructed", metadata);
 
-                if (!after.IsSparse)
+                if (!indexInfo.IsSparse)
                 {
-                    // The collapse ran but produced a full index. This is expected only for a
-                    // repository with no out-of-cone directories to collapse; warn, do not fail.
-                    tracer.RelatedWarning("Clone-time sparse construction left a full index; the repository may have no directories to collapse.");
+                    tracer.RelatedWarning("Clone-time sparse checkout left a full index; the repository may have no directories to collapse.");
                 }
             }
             else
             {
-                tracer.RelatedWarning("Could not read the index after clone-time sparse construction: " + afterError);
+                tracer.RelatedWarning("Could not read the index after clone-time sparse checkout: " + readError);
             }
-
-            return true;
         }
 
         private void CreateGitScript(GVFSEnlistment enlistment)

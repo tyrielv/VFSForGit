@@ -165,6 +165,26 @@ namespace GVFS.FunctionalTests.Tools
             return enlistment;
         }
 
+        /// <summary>
+        /// Runs 'gvfs clone --sparse-index --no-mount' expecting it to fail (the configured git does
+        /// not advertise the sparse-index capability), and returns the enlistment - whose only
+        /// artifact is the partially-created root - together with the captured clone output. The
+        /// caller asserts the failure and then deletes the root. Used by the fail-fast test.
+        /// </summary>
+        public static GVFSFunctionalTestEnlistment CloneSparseIndexExpectingCapabilityFailure(string pathToGvfs, out string cloneOutput)
+        {
+            GVFSFunctionalTestEnlistment enlistment = new GVFSFunctionalTestEnlistment(
+                pathToGvfs,
+                GetUniqueEnlistmentRoot(),
+                GVFSTestConfig.RepoToClone,
+                Properties.Settings.Default.Commitish,
+                GVFSTestConfig.LocalCacheRoot,
+                serviceName: null);
+
+            cloneOutput = enlistment.gvfsProcess.CloneSparseIndexExpectingFailure(enlistment.RepoUrl, enlistment.Commitish);
+            return enlistment;
+        }
+
         public static string GetUniqueEnlistmentRoot()
         {
             return Path.Combine(Properties.Settings.Default.EnlistmentRoot, Guid.NewGuid().ToString("N").Substring(0, 20));

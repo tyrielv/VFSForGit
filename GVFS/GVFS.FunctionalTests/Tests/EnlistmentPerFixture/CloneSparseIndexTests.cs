@@ -17,11 +17,23 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
     /// clone, so the enlistment is already sparse before its first mount - with no post-hoc
     /// collapse. See decisions/0015.
     ///
-    /// Each test provisions a fresh enlistment with 'gvfs clone --no-mount' (so the on-disk index
-    /// can be read before the first mount, and the first mount can be timed), then mounts and
-    /// asserts the mount projects the complete HEAD tree from the collapsed index. The control
-    /// test proves a plain 'gvfs clone' is byte-for-byte unaffected: it still produces a full
-    /// index.
+    /// The feature has a hard prerequisite: the configured git must advertise
+    /// 'feature: vfs-sparse-index' in 'git version --build-options' (decisions/0018). Without it,
+    /// git re-expands the index during checkout and would silently write a FULL index, so clone
+    /// fails fast. These tests therefore split by the configured git's capability:
+    ///
+    ///  - <see cref="CloneWithSparseIndexIsAlreadySparseBeforeFirstMountAndProjectsCompleteTree"/>
+    ///    asserts the sparse construction and complete projection. It runs only when the git is
+    ///    capable, and <see cref="Assert.Ignore(string)"/>s otherwise (e.g. on stock git today).
+    ///  - <see cref="CloneWithSparseIndexFailsFastWhenGitLacksCapability"/> asserts the fail-fast
+    ///    behavior. It runs only when the git is NOT capable, and Ignores otherwise. This is the
+    ///    test that runs today on stock git.
+    ///  - <see cref="CloneWithoutSparseIndexProducesFullIndexAndMountsReady"/> is the control and
+    ///    always runs.
+    ///
+    /// Each sparse/control test provisions a fresh enlistment with 'gvfs clone --no-mount' (so the
+    /// on-disk index can be read before the first mount, and the first mount can be timed), then
+    /// mounts and asserts the mount projects the complete HEAD tree from the collapsed index.
     ///
     /// The DIRC header is read directly and 'git ls-files --sparse' is used with the virtual file
     /// system disabled - never plain 'git ls-files', which forces the sparse index to expand.
@@ -30,6 +42,17 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
     public class CloneSparseIndexTests
     {
         private const string AutoSparseIndexConfig = "gvfs.auto-sparse-index";
+
+        // The exact line 'git version --build-options' emits on a capable git build.
+        private const string VfsSparseIndexCapabilityLine = "feature: vfs-sparse-index";
+
+        private const string CapabilityRequiredSkipReason =
+            "The configured git does not advertise 'feature: vfs-sparse-index'; clone-time sparse " +
+            "construction cannot be validated. Install a git build with VFS for Git sparse-index support.";
+
+        private const string CapabilityPresentSkipReason =
+            "The configured git advertises 'feature: vfs-sparse-index', so 'gvfs clone --sparse-index' " +
+            "does not fail fast.";
 
         // Read git objects/trees and the raw index directly instead of through the projection.
         private const string DisableVfs = "-c core.virtualfilesystem= -c core.hookspath= -c core.quotepath=false";
@@ -54,6 +77,11 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
         [TestCase]
         public void CloneWithSparseIndexIsAlreadySparseBeforeFirstMountAndProjectsCompleteTree()
         {
+            if (!ConfiguredGitSupportsVfsSparseIndex())
+            {
+                Assert.Ignore(CapabilityRequiredSkipReason);
+            }
+
             GVFSFunctionalTestEnlistment enlistment = GVFSFunctionalTestEnlistment.CloneNoMount(GVFSTestConfig.PathToGVFS, sparseIndex: true);
             try
             {
@@ -152,6 +180,38 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
         }
 
         [TestCase]
+        public void CloneWithSparseIndexFailsFastWhenGitLacksCapability()
+        {
+            if (ConfiguredGitSupportsVfsSparseIndex())
+            {
+                Assert.Ignore(CapabilityPresentSkipReason);
+            }
+
+            // The clone must fail (non-zero exit) rather than silently producing a full index. The
+            // harness asserts the non-zero exit; here we confirm the failure was the capability gate
+            // and that no working enlistment was produced.
+            string cloneOutput;
+            GVFSFunctionalTestEnlistment enlistment =
+                GVFSFunctionalTestEnlistment.CloneSparseIndexExpectingCapabilityFailure(GVFSTestConfig.PathToGVFS, out cloneOutput);
+            try
+            {
+                cloneOutput.ShouldContain(VfsSparseIndexCapabilityLine);
+
+                enlistment.IsMounted().ShouldBeFalse("A clone that failed fast must not leave a mounted enlistment.");
+
+                // The gate fails before checkout, so no index is written - certainly not a full one
+                // masquerading as success.
+                string indexPath = Path.Combine(enlistment.RepoRoot, ".git", "index");
+                File.Exists(indexPath).ShouldBeFalse(
+                    "Clone failed fast on the missing git capability, so it must not have written an index.");
+            }
+            finally
+            {
+                enlistment.DeleteEnlistment();
+            }
+        }
+
+        [TestCase]
         public void CloneWithoutSparseIndexProducesFullIndexAndMountsReady()
         {
             GVFSFunctionalTestEnlistment enlistment = GVFSFunctionalTestEnlistment.CloneNoMount(GVFSTestConfig.PathToGVFS, sparseIndex: false);
@@ -203,6 +263,25 @@ namespace GVFS.FunctionalTests.Tests.EnlistmentPerFixture
             {
                 enlistment.UnmountAndDeleteAll();
             }
+        }
+
+        private static bool ConfiguredGitSupportsVfsSparseIndex()
+        {
+            ProcessResult result = GitProcess.InvokeProcess(Environment.CurrentDirectory, "version --build-options");
+            if (result.ExitCode != 0 || string.IsNullOrEmpty(result.Output))
+            {
+                return false;
+            }
+
+            foreach (string line in result.Output.Split('\n'))
+            {
+                if (line.Trim().Equals(VfsSparseIndexCapabilityLine, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static int ReadIndexEntryCount(string indexPath)
