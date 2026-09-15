@@ -804,6 +804,14 @@ namespace GVFS.CommandLine
                 // The full index is now written. Collapse it to a sparse index in place so the
                 // enlistment is already sparse before its first mount, instead of paying the
                 // one-time collapse of a large full index later. See decisions/0015.
+                //
+                // The collapse is deliberately AFTER the checkout, not before it. Setting the cone
+                // and core.sparseCheckout before ForceCheckout does not make git write a sparse
+                // index: the checkout runs with core.virtualfilesystem active, so
+                // apply_virtualfilesystem re-expands the index in-process (ADR 0001 blocker G-a),
+                // and enabling sparse-checkout during the GVFS checkout leaves an index state that
+                // the collapse can no longer reduce. A clean GVFS checkout (sparse-checkout off)
+                // followed by this collapse (VFS disabled) is what produces a sparse index.
                 if (!this.TryConstructSparseIndex(tracer, enlistment, git, fileSystem, out errorMessage))
                 {
                     tracer.RelatedError(errorMessage);
