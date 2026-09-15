@@ -91,6 +91,14 @@ namespace GVFS.Common
              * builder and writer keep compiling and getting exercised by unit tests. */
             public const string AutoSparseIndex = GVFSPrefix + "auto-sparse-index";
             public const bool AutoSparseIndexDefault = false;
+
+            /* Opt-in refinement to cone construction. When set, the cone builder collapses a
+             * parent-only ancestor chain into a single recursive include wherever doing so is
+             * entry neutral, which cuts pattern count and cone churn for a directory that is
+             * being worked wholesale. It does not shrink the index, so it is off by default and
+             * only meaningful when AutoSparseIndex is also on. */
+            public const string SparseIndexConeGranularity = GVFSPrefix + "sparse-index-cone-granularity";
+            public const bool SparseIndexConeGranularityDefault = false;
         }
 
         /// <summary>

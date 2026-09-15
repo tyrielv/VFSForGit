@@ -32,10 +32,32 @@ namespace GVFS.Common.Sparse
         /// </param>
         public static ConePatternSet BuildFromModifiedPaths(IEnumerable<string> modifiedPaths)
         {
+            return BuildFromModifiedPaths(modifiedPaths, subtreeFileCounter: null, options: null);
+        }
+
+        /// <summary>
+        /// Build a cone pattern set, optionally applying the granularity heuristic that
+        /// collapses a parent-only ancestor chain into a single recursive include.
+        /// </summary>
+        /// <param name="modifiedPaths">See the other overload.</param>
+        /// <param name="subtreeFileCounter">
+        /// Supplies capped subtree file counts. When null the heuristic is skipped entirely and
+        /// the result is byte-for-byte the parent-only cone, which is the default behavior.
+        /// </param>
+        /// <param name="options">Tuning constants; <see cref="ConeGranularityOptions.Default"/> when null.</param>
+        public static ConePatternSet BuildFromModifiedPaths(
+            IEnumerable<string> modifiedPaths,
+            IConeSubtreeFileCounter subtreeFileCounter,
+            ConeGranularityOptions options)
+        {
             ArgumentNullException.ThrowIfNull(modifiedPaths);
 
             HashSet<string> recursiveDirectories = new HashSet<string>(StringComparer.Ordinal);
             HashSet<string> parentOnlyDirectories = new HashSet<string>(StringComparer.Ordinal);
+
+            // Modified file paths, kept so the heuristic can count modified files under a
+            // candidate directory. Only populated when the heuristic will actually run.
+            List<string> modifiedFiles = subtreeFileCounter == null ? null : new List<string>();
 
             foreach (string rawPath in modifiedPaths)
             {
@@ -60,6 +82,8 @@ namespace GVFS.Common.Sparse
                 }
                 else
                 {
+                    modifiedFiles?.Add(cleanPath);
+
                     string parent = GetParent(cleanPath);
                     if (parent.Length != 0)
                     {
@@ -67,6 +91,16 @@ namespace GVFS.Common.Sparse
                         AddAncestors(parent, parentOnlyDirectories);
                     }
                 }
+            }
+
+            if (subtreeFileCounter != null)
+            {
+                CollapseQualifyingChains(
+                    parentOnlyDirectories,
+                    recursiveDirectories,
+                    modifiedFiles,
+                    subtreeFileCounter,
+                    options ?? ConeGranularityOptions.Default);
             }
 
             // A recursive directory nested inside another recursive directory is redundant;
@@ -86,6 +120,166 @@ namespace GVFS.Common.Sparse
             sortedRecursive.Sort(StringComparer.Ordinal);
 
             return new ConePatternSet(sortedParents, sortedRecursive);
+        }
+
+        /// <summary>
+        /// Replace a parent-only sub-chain with one recursive include at the shallowest
+        /// directory that qualifies.
+        /// </summary>
+        /// <remarks>
+        /// Candidates are evaluated shallowest first and the walk stops at the first qualifying
+        /// directory on each path, because a recursive include subsumes everything below it and
+        /// collapsing highest yields the fewest patterns. A directory that is a proper ancestor
+        /// of an existing recursive include is never collapsed: that recursive entry came from a
+        /// modified folder, and swallowing it into a larger recursive include would pull in
+        /// unrelated siblings and stop being entry neutral.
+        /// </remarks>
+        private static void CollapseQualifyingChains(
+            HashSet<string> parentOnlyDirectories,
+            HashSet<string> recursiveDirectories,
+            List<string> modifiedFiles,
+            IConeSubtreeFileCounter subtreeFileCounter,
+            ConeGranularityOptions options)
+        {
+            if (parentOnlyDirectories.Count == 0 || modifiedFiles.Count == 0)
+            {
+                return;
+            }
+
+            List<string> candidates = new List<string>(parentOnlyDirectories);
+
+            // Shallowest first, then ordinal so the result does not depend on hash order.
+            candidates.Sort((left, right) =>
+            {
+                int depthComparison = CountSeparators(left).CompareTo(CountSeparators(right));
+                return depthComparison != 0 ? depthComparison : string.CompareOrdinal(left, right);
+            });
+
+            List<string> collapsed = new List<string>();
+
+            foreach (string candidate in candidates)
+            {
+                // Already covered by a recursive include chosen earlier in this pass, or by one
+                // that came from a modified folder.
+                if (IsCoveredByRecursive(candidate, recursiveDirectories))
+                {
+                    continue;
+                }
+
+                if (IsProperAncestorOfAnyRecursive(candidate, recursiveDirectories))
+                {
+                    continue;
+                }
+
+                int modifiedUnder = CountModifiedFilesUnder(candidate, modifiedFiles);
+                if (modifiedUnder == 0)
+                {
+                    continue;
+                }
+
+                if (Qualifies(candidate, modifiedUnder, subtreeFileCounter, options))
+                {
+                    collapsed.Add(candidate);
+                    recursiveDirectories.Add(candidate);
+                }
+            }
+
+            // The parent-only entries for the collapsed directories are now redundant. Their
+            // ancestors stay, because a recursive include does not cover an ancestor's own files.
+            foreach (string directory in collapsed)
+            {
+                parentOnlyDirectories.Remove(directory);
+            }
+        }
+
+        private static bool Qualifies(
+            string directory,
+            int modifiedUnder,
+            IConeSubtreeFileCounter subtreeFileCounter,
+            ConeGranularityOptions options)
+        {
+            int subtreeFiles;
+
+            // Size gate: a small subtree with enough activity under it.
+            if (modifiedUnder >= options.MinModifiedFiles
+                && subtreeFileCounter.TryCountSubtreeFiles(directory, options.MaxSubtreeFiles, out subtreeFiles)
+                && subtreeFiles > 0)
+            {
+                return true;
+            }
+
+            // Density gate: most of the subtree is already modified, whatever its size. Capping
+            // the walk at the largest subtree that could still satisfy the ratio keeps this
+            // O(cap) rather than O(subtree), and a subtree over the cap fails the gate anyway.
+            int densityCap = options.DensityCapFor(modifiedUnder);
+            if (densityCap > 0
+                && subtreeFileCounter.TryCountSubtreeFiles(directory, densityCap, out subtreeFiles)
+                && subtreeFiles > 0
+                && (double)modifiedUnder / subtreeFiles >= options.MinDensity)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static int CountModifiedFilesUnder(string directory, List<string> modifiedFiles)
+        {
+            int count = 0;
+            foreach (string file in modifiedFiles)
+            {
+                if (IsDescendantOf(file, directory))
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        private static bool IsCoveredByRecursive(string path, HashSet<string> recursiveDirectories)
+        {
+            if (recursiveDirectories.Contains(path))
+            {
+                return true;
+            }
+
+            foreach (string recursive in recursiveDirectories)
+            {
+                if (IsDescendantOf(path, recursive))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsProperAncestorOfAnyRecursive(string path, HashSet<string> recursiveDirectories)
+        {
+            foreach (string recursive in recursiveDirectories)
+            {
+                if (IsDescendantOf(recursive, path))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static int CountSeparators(string path)
+        {
+            int count = 0;
+            for (int i = 0; i < path.Length; i++)
+            {
+                if (path[i] == GVFSConstants.GitPathSeparator)
+                {
+                    count++;
+                }
+            }
+
+            return count;
         }
 
         private static string NormalizePath(string rawPath, out bool isFolder)

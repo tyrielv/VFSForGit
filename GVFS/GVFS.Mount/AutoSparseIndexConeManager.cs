@@ -10,6 +10,7 @@ using GVFS.Common.NamedPipes;
 using GVFS.Common.Sparse;
 using GVFS.Common.Tracing;
 using GVFS.Virtualization;
+using GVFS.Virtualization.Projection;
 
 namespace GVFS.Mount
 {
@@ -62,6 +63,12 @@ namespace GVFS.Mount
         // file GVFS owns. Null until GVFS writes the file once (see decisions/0020).
         private string lastWrittenConeContent;
 
+        // Non-null only when gvfs.sparse-index-cone-granularity is on. Supplies capped subtree
+        // file counts so ConeBuilder can collapse entry-neutral parent-only chains. Read once
+        // at construction: the flag is not meant to change within a mount session, and reading
+        // it per recompute would put a git config process on the hook's reply path.
+        private readonly IConeSubtreeFileCounter subtreeFileCounter;
+
         public AutoSparseIndexConeManager(GVFSContext context, FileSystemCallbacks fileSystemCallbacks)
         {
             ArgumentNullException.ThrowIfNull(context);
@@ -77,6 +84,15 @@ namespace GVFS.Mount
             this.coneLock = new SemaphoreSlim(1, 1);
             this.sparseCheckoutPath = SparseCheckoutPathResolver.GetSparseCheckoutFilePath(context.Enlistment);
             this.workingDirectoryRoot = context.Enlistment.WorkingDirectoryRoot;
+
+            if (LibGit2Repo.GetConfigBoolOrDefault(
+                    context.Tracer,
+                    context.Enlistment.WorkingDirectoryBackingRoot,
+                    GVFSConstants.GitConfig.SparseIndexConeGranularity,
+                    GVFSConstants.GitConfig.SparseIndexConeGranularityDefault))
+            {
+                this.subtreeFileCounter = new ProjectionSubtreeFileCounter(fileSystemCallbacks.GitIndexProjection);
+            }
         }
 
         /// <summary>
@@ -204,7 +220,10 @@ namespace GVFS.Mount
             List<string> allPaths = new List<string>(this.fileSystemCallbacks.GetAllModifiedPaths());
             allPaths.AddRange(this.transientState.GetAllTransientPaths());
 
-            ConePatternSet cone = ConeBuilder.BuildFromModifiedPaths(allPaths);
+            ConePatternSet cone = ConeBuilder.BuildFromModifiedPaths(
+                allPaths,
+                this.subtreeFileCounter,
+                ConeGranularityOptions.Default);
             string newContent = ConeFileWriter.Serialize(cone);
             double coneBuildMs = stopwatch.Elapsed.TotalMilliseconds;
 
