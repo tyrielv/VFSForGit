@@ -194,6 +194,39 @@ namespace GVFS.Common.Git
         }
 
         /// <summary>
+        /// Enumerate a locally-present tree, calling <paramref name="visitor"/> once per entry.
+        /// Does no network work. When the libgit2 repo is unavailable, reports the tree as missing
+        /// so the caller can attempt a download and retry.
+        /// </summary>
+        /// <param name="treeSha">The 40-character hex SHA of the tree to read.</param>
+        /// <param name="visitor">Called once per entry. Spans are only valid for the call.</param>
+        /// <returns>The distinct enumeration result (success, missing, corrupt, or not-a-tree).</returns>
+        public virtual TreeEnumerationResult TryEnumerateTree(string treeSha, TreeEntryVisitor visitor)
+        {
+            TreeEnumerationResult result;
+            if (!this.libgit2RepoInvoker.TryInvoke(repo => repo.EnumerateTree(treeSha, visitor), out result))
+            {
+                return TreeEnumerationResult.MissingTree;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Reads a boolean git config value through the in-process libgit2 repo (no git.exe spawn),
+        /// returning <paramref name="defaultValue"/> when the setting is unset or the repo is unavailable.
+        /// </summary>
+        public virtual bool GetConfigBoolOrDefault(string name, bool defaultValue)
+        {
+            if (this.libgit2RepoInvoker == null)
+            {
+                return defaultValue;
+            }
+
+            return this.libgit2RepoInvoker.GetConfigBoolOrDefault(name, defaultValue);
+        }
+
+        /// <summary>
         /// Reads a git config value through the in-process libgit2 repo (no git.exe spawn).
         /// </summary>
         /// <param name="name">Config setting name (e.g. "gvfs.max-active-enumerations").</param>

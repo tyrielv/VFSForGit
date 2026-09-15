@@ -14,7 +14,28 @@ namespace GVFS.Common.Git
         /// Returns the dictionary of required git config settings for a GVFS enlistment.
         /// These settings override any existing local configuration values.
         /// </summary>
+        /// <remarks>
+        /// This overload never adds the sparse-index settings, so its result is byte-for-byte
+        /// what GVFS has always enforced. Callers that honor the gvfs.auto-sparse-index feature
+        /// flag must use <see cref="GetRequiredSettings(GVFSEnlistment, bool)"/>.
+        /// </remarks>
         public static Dictionary<string, string> GetRequiredSettings(GVFSEnlistment enlistment)
+        {
+            return GetRequiredSettings(enlistment, autoSparseIndexEnabled: false);
+        }
+
+        /// <summary>
+        /// Returns the dictionary of required git config settings for a GVFS enlistment.
+        /// These settings override any existing local configuration values.
+        /// </summary>
+        /// <param name="autoSparseIndexEnabled">
+        /// When true, the three git settings that let git's on-disk index collapse to cone-format
+        /// directory entries are added: core.sparseCheckoutCone, index.sparse, and
+        /// sparse.expectFilesOutsideOfPatterns. When false, the returned dictionary is byte-for-byte
+        /// identical to what GVFS has always enforced (no extra keys), so a repo that has never
+        /// opted in to the feature is unaffected.
+        /// </param>
+        public static Dictionary<string, string> GetRequiredSettings(GVFSEnlistment enlistment, bool autoSparseIndexEnabled)
         {
             string expectedHooksPath = Path.Combine(enlistment.DotGitRoot, GVFSConstants.DotGit.Hooks.RootName);
             expectedHooksPath = Paths.ConvertPathToGitFormat(expectedHooksPath);
@@ -53,7 +74,7 @@ namespace GVFS.Common.Git
                 GitCoreGVFSFlags.SupportsWorktrees)
                 .ToString();
 
-            return new Dictionary<string, string>
+            Dictionary<string, string> requiredSettings = new Dictionary<string, string>
             {
                 // When running 'git am' it will remove the CRs from the patch file by default. This causes the patch to fail to apply because the
                 // file that is getting the patch applied will still have the CRs. There is a --keep-cr option that you can pass the 'git am' command
@@ -184,6 +205,25 @@ namespace GVFS.Common.Git
                 // Disable the builtin FS Monitor in case it was enabled globally.
                 { "core.useBuiltinFSMonitor", "false" },
             };
+
+            if (autoSparseIndexEnabled)
+            {
+                // These three settings together satisfy git's is_sparse_index_allowed(), which
+                // otherwise refuses to keep the on-disk index collapsed. They are added only when
+                // the feature is on, so a repo that never opted in gets the exact config above.
+                //
+                // core.sparseCheckoutCone  - the index may only collapse under cone-format patterns.
+                // index.sparse             - git writes/keeps a sparse (collapsed) index.
+                // sparse.expectFilesOutsideOfPatterns - VFS for Git keeps a full projection, so
+                //     files exist on disk outside the cone; without this, disabling VFS re-enables
+                //     clear_skip_worktree_from_present_files(), which clears skip-worktree on every
+                //     present entry and re-expands the index.
+                requiredSettings[GitConfigSetting.CoreSparseCheckoutConeName] = "true";
+                requiredSettings[GitConfigSetting.IndexSparseName] = "true";
+                requiredSettings[GitConfigSetting.SparseExpectFilesOutsideOfPatternsName] = "true";
+            }
+
+            return requiredSettings;
         }
     }
 }

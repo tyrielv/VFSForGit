@@ -236,6 +236,16 @@ namespace GVFS.Virtualization.Projection
                 return this.utf16string;
             }
 
+            /// <summary>
+            /// True when this string has zero length. Does not allocate. Used to fail fast on an
+            /// empty child name during projection builds, which would otherwise crash ProjFS
+            /// enumeration with "fileName cannot be empty".
+            /// </summary>
+            public bool IsEmpty
+            {
+                get { return this.utf16string != null ? this.utf16string.Length == 0 : this.length == 0; }
+            }
+
             private void SetToString(string value)
             {
                 this.utf16string = value;

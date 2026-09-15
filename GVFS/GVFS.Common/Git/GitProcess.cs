@@ -888,6 +888,92 @@ namespace GVFS.Common.Git
             return this.InvokeGitAgainstDotGitFolder("read-tree " + treeIsh);
         }
 
+        /// <summary>
+        /// Expands the on-disk index from a sparse (collapsed) index back to a full index,
+        /// in place, without changing the working tree. This is the recovery path for a
+        /// persisted sparse index that VFS for Git cannot yet project.
+        /// </summary>
+        /// <remarks>
+        /// Must run with GVFS unmounted, so every GVFS hook is neutralized:
+        ///   -c core.virtualfilesystem=   disables the VFS hook, which otherwise blocks on a
+        ///                                named pipe to a mount that is not running.
+        ///   -c core.hookspath=           disables the GVFS pre-command hook, which aborts git
+        ///                                commands when the mount is down.
+        ///   -c index.sparse=false        forces git to write a full (expanded) index.
+        /// COMMAND_HOOK_LOCK=true (usePreCommandHook: false) is belt-and-suspenders for the
+        /// pre-command hook. --force-write-index makes git rewrite the index even though no
+        /// tracked content changed; reading the sparse index expands it in-core and, with
+        /// index.sparse=false, the rewrite persists the expanded form. Unlike read-tree HEAD,
+        /// this does not reset staged changes, so it is safe against data loss.
+        /// </remarks>
+        public Result ForceExpandSparseIndex()
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.CoreVirtualFileSystemName + "= -c core.hookspath= -c " + GitConfigSetting.IndexSparseName + "=false update-index --force-write-index",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: false,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false);
+        }
+
+        /// <summary>
+        /// Reconciles the on-disk index to the current cone-mode sparse-checkout patterns,
+        /// collapsing out-of-cone directories to sparse-directory entries, in place, without
+        /// touching the working tree. Used by automatic sparse-index cone management after the
+        /// mount rewrites the sparse-checkout file, so the collapse is applied while mounted.
+        /// </summary>
+        /// <remarks>
+        /// Runs while GVFS is mounted, so - unlike <see cref="ForceExpandSparseIndex"/>, which
+        /// runs unmounted - it must KEEP the virtual filesystem enabled and keep the hooks path
+        /// intact. This mirrors the proven in-mount collapse command that
+        /// SparseIndexProjectionTests runs against a live mount, and the only other in-mount
+        /// index writer, <c>HandleDehydrateFolders</c>'s <c>git reset</c>:
+        ///   * <c>core.virtualfilesystem</c> stays set, so the live ProjFS provider still owns
+        ///     skip-worktree. Disabling it here makes the in-process index write fail with
+        ///     "fatal: Unable to write new index file" against the mounted provider, and would
+        ///     also re-enable clear_skip_worktree_from_present_files() and clear the very bits
+        ///     that let the index collapse. (The unmounted recipe in decisions/0015 disables VFS
+        ///     and adds sparse.expectFilesOutsideOfPatterns to compensate; the in-mount handler
+        ///     does neither. See decisions/0019.)
+        ///   * The read-object hook is left ENABLED (useReadObjectHook: true). Writing a
+        ///     collapsed (index.sparse=true) index makes git read HEAD tree objects to form the
+        ///     sparse-directory entries; under ProjFS some of those trees can still be virtual,
+        ///     so disabling object virtualization (core.virtualizeobjects=false) fails the write
+        ///     with "fatal: Unable to write new index file". The proven in-mount collapse in
+        ///     SparseIndexProjectionTests keeps object virtualization on for the same reason.
+        ///   * The hooks path is left at its default. git consults the virtualfilesystem hook
+        ///     while writing the index to learn which entries are present; emptying
+        ///     <c>core.hookspath</c> hides that hook and also fails the write. Anti-recursion
+        ///     does not need it: COMMAND_HOOK_LOCK=true (usePreCommandHook: false) already makes
+        ///     the GVFS pre-command hook bail, exactly as <c>git reset</c> relies on for
+        ///     dehydrate, so this git process cannot re-enter the mount pipe with a widen.
+        ///   * <c>-c core.sparseCheckout=true -c core.sparseCheckoutCone=true</c> keep cone-mode
+        ///     matching on, and <c>-c index.sparse=true</c> makes git write a collapsed sparse
+        ///     index.
+        /// --force-write-index makes git rewrite the index even though no tracked content
+        /// changed, so the new patterns take effect. Unlike sparse-checkout reapply, this never
+        /// walks the working tree, so it is both safe on a live ProjFS mount and fast at scale.
+        /// See decisions/0011, 0015, and 0019.
+        /// </remarks>
+        public Result ForceCollapseSparseIndex()
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.CoreSparseCheckoutName + "=true"
+                + " -c " + GitConfigSetting.CoreSparseCheckoutConeName + "=true"
+                + " -c " + GitConfigSetting.IndexSparseName + "=true"
+                + " update-index --force-write-index",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: true,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false);
+        }
+
         public Result PrunePacked(string gitObjectDirectory)
         {
             return this.InvokeGitAgainstDotGitFolder(

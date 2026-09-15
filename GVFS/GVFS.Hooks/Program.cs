@@ -25,6 +25,7 @@ namespace GVFS.Hooks
         private static string enlistmentRoot;
         private static string enlistmentPipename;
         private static string normalizedCurrentDirectory;
+        private static bool runningInWorktree;
         private static Random random = new Random();
 
         private delegate void LockRequestDelegate(bool unattended, string[] args, int pid, NamedPipeClient pipeClient);
@@ -74,6 +75,11 @@ namespace GVFS.Hooks
                 if (worktreeSuffix != null)
                 {
                     enlistmentPipename += worktreeSuffix;
+
+                    // A linked worktree keeps its cone file under its own git dir, which the
+                    // cone-management hook does not resolve for the local in-cone check, so
+                    // it defers those to the mount instead.
+                    runningInWorktree = true;
                 }
 
                 switch (GetHookType(args))
@@ -134,6 +140,8 @@ namespace GVFS.Hooks
                     RunWorktreePreCommand(args);
                     break;
             }
+
+            TrySendConeWiden(args);
         }
 
         private static bool ArgsBlockHydrationStatus(string[] args)
@@ -154,6 +162,8 @@ namespace GVFS.Hooks
                     RunWorktreePostCommand(args);
                     break;
             }
+
+            TrySendConeNarrow(args);
         }
 
         private static string ResolvePath(string path)
