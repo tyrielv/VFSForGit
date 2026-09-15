@@ -195,6 +195,19 @@ namespace GVFS.Common
             int positionalIndex = 0;
             bool stashTakesPaths = false;
 
+            // Some flags remove the command's leading ref operand, so every
+            // positional becomes a pathspec. The canonical case is conflict
+            // resolution: "git checkout --ours <path>" / "--theirs <path>" and
+            // "git checkout -p <path>" name a working-tree path with no ref, yet
+            // the default checkout grammar would misread that first positional as
+            // a branch. Detect these up front so classification uses the right
+            // leading-ref count regardless of token order.
+            int leadingRefCount = spec.LeadingRefCount;
+            if (leadingRefCount > 0 && HasRefSuppressingFlag(tokens, startIndex, spec))
+            {
+                leadingRefCount = 0;
+            }
+
             for (int i = startIndex; i < tokens.Count; i++)
             {
                 string token = tokens[i];
@@ -279,7 +292,7 @@ namespace GVFS.Common
                         subcommand = token;
                     }
 
-                    ClassifyPositional(spec, token, positionalIndex, pathspecs, ref stashTakesPaths);
+                    ClassifyPositional(spec, leadingRefCount, token, positionalIndex, pathspecs, ref stashTakesPaths);
                     positionalIndex++;
                 }
                 else
@@ -309,6 +322,7 @@ namespace GVFS.Common
 
         private static void ClassifyPositional(
             GitCommandSpec spec,
+            int leadingRefCount,
             string token,
             int positionalIndex,
             List<string> pathspecs,
@@ -321,7 +335,7 @@ namespace GVFS.Common
                     break;
 
                 case PositionalKind.LeadingRefsThenPathspec:
-                    if (positionalIndex >= spec.LeadingRefCount)
+                    if (positionalIndex >= leadingRefCount)
                     {
                         pathspecs.Add(token);
                     }
@@ -373,6 +387,42 @@ namespace GVFS.Common
                     // Last character: value is the following token.
                     // Otherwise: the rest of the cluster is a baked-in value.
                     return j == token.Length - 1;
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Returns true when any of the command's ref-suppressing flags appears
+        /// before a "--" separator. Such a flag means the command has no ref
+        /// operand, so every positional is a pathspec.
+        /// </summary>
+        private static bool HasRefSuppressingFlag(IReadOnlyList<string> tokens, int startIndex, GitCommandSpec spec)
+        {
+            if (spec.RefSuppressingFlags.Count == 0)
+            {
+                return false;
+            }
+
+            for (int i = startIndex; i < tokens.Count; i++)
+            {
+                string token = tokens[i];
+
+                if (token == DashDash)
+                {
+                    // Past "--" a matching token is a literal path, not a flag.
+                    break;
+                }
+
+                if (IsInjectedArg(token))
+                {
+                    continue;
+                }
+
+                if (spec.RefSuppressingFlags.Contains(token))
+                {
+                    return true;
                 }
             }
 
@@ -471,7 +521,8 @@ namespace GVFS.Common
                 PositionalKind.LeadingRefsThenPathspec,
                 leadingRefCount: 1,
                 longOptionsWithValue: new[] { "--conflict", "--orphan" },
-                shortOptionsWithValue: new[] { 'b', 'B' });
+                shortOptionsWithValue: new[] { 'b', 'B' },
+                refSuppressingFlags: new[] { "--ours", "--theirs", "--patch", "-p" });
 
             specs["switch"] = new GitCommandSpec(
                 PositionalKind.None,
@@ -511,7 +562,8 @@ namespace GVFS.Common
                 PositionalKind positionalKind,
                 int leadingRefCount = 0,
                 IEnumerable<string> longOptionsWithValue = null,
-                IEnumerable<char> shortOptionsWithValue = null)
+                IEnumerable<char> shortOptionsWithValue = null,
+                IEnumerable<string> refSuppressingFlags = null)
             {
                 this.PositionalKind = positionalKind;
                 this.LeadingRefCount = leadingRefCount;
@@ -521,6 +573,9 @@ namespace GVFS.Common
                 this.ShortOptionsWithValue = shortOptionsWithValue == null
                     ? EmptyShortOptions
                     : new HashSet<char>(shortOptionsWithValue);
+                this.RefSuppressingFlags = refSuppressingFlags == null
+                    ? EmptyLongOptions
+                    : new HashSet<string>(refSuppressingFlags, StringComparer.Ordinal);
             }
 
             public PositionalKind PositionalKind { get; }
@@ -530,6 +585,8 @@ namespace GVFS.Common
             public HashSet<string> LongOptionsWithValue { get; }
 
             public HashSet<char> ShortOptionsWithValue { get; }
+
+            public HashSet<string> RefSuppressingFlags { get; }
         }
     }
 }

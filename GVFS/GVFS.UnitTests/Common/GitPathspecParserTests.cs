@@ -499,5 +499,122 @@ namespace GVFS.UnitTests.Common
             GitPathspecParser.ParseHookArgs(new[] { "pre-command", "sparse-checkout", "--", "set" })
                 .Subcommand.ShouldBeNull();
         }
+
+        // ── Out-of-cone conflict resolution (the W11 case) ──────────────
+        //
+        // When a rebase/merge conflicts on a file outside the sparse cone, the
+        // user resolves it by naming that path: "git add <path>", "git rm
+        // <path>", "git checkout --ours/--theirs <path>", "git restore
+        // <path>". Each must yield the path so the pre-command hook can widen
+        // the cone and let plain (non "--sparse") Git succeed.
+
+        [TestCase]
+        public void Add_OutOfConeConflictPath_NamesPath()
+        {
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "add", "out0005/f0001.txt" });
+            result.Pathspecs.ShouldMatchInOrder("out0005/f0001.txt");
+            result.NamesPaths.ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void Rm_OutOfConeConflictPath_NamesPath()
+        {
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "rm", "out0005/f0001.txt" });
+            result.Pathspecs.ShouldMatchInOrder("out0005/f0001.txt");
+            result.NamesPaths.ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void Restore_ConflictPathWithOurs_NamesPath()
+        {
+            // restore treats every positional as a pathspec, so --ours is just a
+            // boolean flag; the path is still extracted.
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "restore", "--ours", "out0005/f0001.txt" });
+            result.Pathspecs.ShouldMatchInOrder("out0005/f0001.txt");
+            result.NamesPaths.ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void Checkout_DashDashConflictPath_NamesPath()
+        {
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "checkout", "--", "out0005/f0001.txt" });
+            result.Pathspecs.ShouldMatchInOrder("out0005/f0001.txt");
+            result.NamesPaths.ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void Reset_DashDashConflictPath_NamesPath()
+        {
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "reset", "--", "out0005/f0001.txt" });
+            result.Pathspecs.ShouldMatchInOrder("out0005/f0001.txt");
+            result.NamesPaths.ShouldBeTrue();
+        }
+
+        // ── checkout --ours / --theirs / -p suppress the leading ref ────
+        //
+        // "git checkout --ours <path>" has no ref operand, so the first
+        // positional is a pathspec, not a branch. Without this, the parser
+        // would misread the conflicted path as a ref and never widen for it.
+
+        [TestCase]
+        public void Checkout_Ours_FirstPositionalIsPathspec()
+        {
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "checkout", "--ours", "out0005/f0001.txt" });
+            result.Pathspecs.ShouldMatchInOrder("out0005/f0001.txt");
+            result.NamesPaths.ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void Checkout_Theirs_FirstPositionalIsPathspec()
+        {
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "checkout", "--theirs", "a.txt", "b.txt" });
+            result.Pathspecs.ShouldMatchInOrder("a.txt", "b.txt");
+        }
+
+        [TestCase]
+        public void Checkout_ShortPatch_FirstPositionalIsPathspec()
+        {
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "checkout", "-p", "out0005/f0001.txt" });
+            result.Pathspecs.ShouldMatchInOrder("out0005/f0001.txt");
+        }
+
+        [TestCase]
+        public void Checkout_Ours_FlagAfterPathIsStillSuppressing()
+        {
+            // Flag order is not fixed: the ref-suppressing flag is detected
+            // across the whole command, so the path is a pathspec even when the
+            // flag follows it.
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "checkout", "out0005/f0001.txt", "--theirs" });
+            result.Pathspecs.ShouldMatchInOrder("out0005/f0001.txt");
+        }
+
+        [TestCase]
+        public void Checkout_Ours_NoPath_NoPathspecs()
+        {
+            // "git checkout --ours" with no path still names nothing.
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "checkout", "--ours" });
+            result.Pathspecs.ShouldBeEmpty();
+            result.NamesPaths.ShouldBeFalse();
+        }
+
+        [TestCase]
+        public void Checkout_LiteralOursPathAfterDashDash_IsPathspec()
+        {
+            // After "--", "--ours" is a literal path, not a ref-suppressing flag;
+            // the branch before "--" is still a ref.
+            ParsedGitCommand result = GitPathspecParser.ParseHookArgs(
+                new[] { "pre-command", "checkout", "topic", "--", "--ours" });
+            result.Pathspecs.ShouldMatchInOrder("--ours");
+        }
     }
 }
