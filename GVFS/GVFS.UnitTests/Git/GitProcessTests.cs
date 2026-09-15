@@ -1,6 +1,7 @@
 ﻿using GVFS.Common.Git;
 using GVFS.Tests.Should;
 using GVFS.UnitTests.Mock.Common;
+using GVFS.UnitTests.Mock.Git;
 using NUnit.Framework;
 using System.Diagnostics;
 
@@ -100,6 +101,46 @@ namespace GVFS.UnitTests.Git
             processName.ShouldBeNull();
             exitCode.ShouldEqual(-1);
             error.ShouldBeNull();
+        }
+
+        [TestCase]
+        public void CollapseSparseIndexIssuesForceWriteIndexWithHooksDisabledAndSparseOn()
+        {
+            // Clone-time sparse construction collapses the freshly written full index in place.
+            // The command must disable every GVFS hook (no mount is running), keep skip-worktree
+            // on present files (sparse.expectFilesOutsideOfPatterns=true), and force a sparse
+            // rewrite (index.sparse=true) via update-index --force-write-index.
+            MockGitProcess git = new MockGitProcess();
+            string expectedCommand =
+                "-c core.virtualfilesystem= -c core.hookspath= -c sparse.expectFilesOutsideOfPatterns=true -c index.sparse=true update-index --force-write-index";
+            git.SetExpectedCommandResult(expectedCommand, () => new GitProcess.Result(string.Empty, string.Empty, 0));
+
+            GitProcess.Result result = git.CollapseSparseIndex();
+
+            result.ExitCodeIsSuccess.ShouldBeTrue();
+            git.CommandsRun.Count.ShouldEqual(1);
+            git.CommandsRun[0].ShouldEqual(expectedCommand);
+        }
+
+        [TestCase]
+        public void CollapseSparseIndexIsTheInverseOfForceExpandSparseIndex()
+        {
+            // The only differences between collapse and expand are the index.sparse value and
+            // the extra sparse.expectFilesOutsideOfPatterns guard that collapse needs. Both
+            // neutralize the GVFS hooks and use update-index --force-write-index.
+            MockGitProcess collapseGit = new MockGitProcess();
+            collapseGit.SetExpectedCommandResult(string.Empty, () => new GitProcess.Result(string.Empty, string.Empty, 0), matchPrefix: true);
+            collapseGit.CollapseSparseIndex();
+
+            MockGitProcess expandGit = new MockGitProcess();
+            expandGit.SetExpectedCommandResult(string.Empty, () => new GitProcess.Result(string.Empty, string.Empty, 0), matchPrefix: true);
+            expandGit.ForceExpandSparseIndex();
+
+            collapseGit.CommandsRun[0].Contains("index.sparse=true").ShouldBeTrue();
+            collapseGit.CommandsRun[0].Contains("sparse.expectFilesOutsideOfPatterns=true").ShouldBeTrue();
+            expandGit.CommandsRun[0].Contains("index.sparse=false").ShouldBeTrue();
+            expandGit.CommandsRun[0].Contains("update-index --force-write-index").ShouldBeTrue();
+            collapseGit.CommandsRun[0].Contains("update-index --force-write-index").ShouldBeTrue();
         }
 
         [TestCase]

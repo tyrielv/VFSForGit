@@ -919,6 +919,42 @@ namespace GVFS.Common.Git
                 usePreCommandHook: false);
         }
 
+        /// <summary>
+        /// Collapses the on-disk index to a sparse index in place, without walking the
+        /// working tree. This is the mirror of <see cref="ForceExpandSparseIndex"/> and is
+        /// used at clone time to construct a sparse index directly from the freshly written
+        /// full index, so the enlistment is already sparse before its first mount.
+        /// </summary>
+        /// <remarks>
+        /// Must run with GVFS unmounted, so every GVFS hook is neutralized:
+        ///   -c core.virtualfilesystem=   disables the VFS hook, which otherwise blocks on a
+        ///                                named pipe to a mount that is not running.
+        ///   -c core.hookspath=           disables the GVFS pre-command hook, which aborts git
+        ///                                commands when the mount is down.
+        ///   -c index.sparse=true         forces git to write a sparse (collapsed) index.
+        ///   -c sparse.expectFilesOutsideOfPatterns=true  keeps clear_skip_worktree_from_present_files
+        ///                                from clearing skip-worktree on the present files that
+        ///                                VFS for Git keeps outside the cone; without it, disabling
+        ///                                VFS re-expands the index (see decisions/0001).
+        /// --force-write-index makes git rewrite the index even though no tracked content
+        /// changed; convert_to_sparse collapses the out-of-cone directories in place. Unlike
+        /// sparse-checkout reapply, this does not iterate the working tree, so it stays cheap
+        /// at scale. On a freshly cloned index (skip-worktree set on every entry, valid
+        /// cache-tree) it collapses to the minimal cone. See decisions/0015.
+        /// </remarks>
+        public Result CollapseSparseIndex()
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.CoreVirtualFileSystemName + "= -c core.hookspath= -c " + GitConfigSetting.SparseExpectFilesOutsideOfPatternsName + "=true -c " + GitConfigSetting.IndexSparseName + "=true update-index --force-write-index",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: false,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false);
+        }
+
         public Result PrunePacked(string gitObjectDirectory)
         {
             return this.InvokeGitAgainstDotGitFolder(

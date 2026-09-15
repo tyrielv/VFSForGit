@@ -15,6 +15,11 @@ namespace GVFS.Common.Git
         public const string IndexSparseName = "index.sparse";
         public const string SparseExpectFilesOutsideOfPatternsName = "sparse.expectFilesOutsideOfPatterns";
 
+        // core.sparseCheckout turns on git's sparse-checkout machinery so it applies the
+        // cone in info/sparse-checkout when it rewrites the index. Clone-time sparse-index
+        // construction sets this; enable/disable of the feature leave it untouched.
+        public const string CoreSparseCheckoutName = "core.sparseCheckout";
+
         public const string HttpSslCert = "http.sslcert";
         public const string HttpSslVerify = "http.sslverify";
         public const string HttpSslCertPasswordProtected = "http.sslcertpasswordprotected";

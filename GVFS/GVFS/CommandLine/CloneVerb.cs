@@ -3,6 +3,7 @@ using GVFS.Common.FileSystem;
 using GVFS.Common.Git;
 using GVFS.Common.Http;
 using GVFS.Common.NamedPipes;
+using GVFS.Common.Sparse;
 using GVFS.Common.Tracing;
 using System;
 using System.ComponentModel;
@@ -798,6 +799,18 @@ namespace GVFS.CommandLine
                 }
             }
 
+            if (this.SparseIndex)
+            {
+                // The full index is now written. Collapse it to a sparse index in place so the
+                // enlistment is already sparse before its first mount, instead of paying the
+                // one-time collapse of a large full index later. See decisions/0015.
+                if (!this.TryConstructSparseIndex(tracer, enlistment, git, fileSystem, out errorMessage))
+                {
+                    tracer.RelatedError(errorMessage);
+                    return new Result(errorMessage);
+                }
+            }
+
             if (!RepoMetadata.TryInitialize(tracer, enlistment.DotGVFSRoot, out errorMessage))
             {
                 tracer.RelatedError(errorMessage);
@@ -839,6 +852,94 @@ namespace GVFS.CommandLine
         }
 
         // TODO(#1364): Don't call this method on POSIX platforms (or have it no-op on them)
+        /// <summary>
+        /// Construct a sparse index directly at clone time so the enlistment is already sparse
+        /// before its first mount, instead of paying the one-time collapse of a large full index
+        /// later.
+        /// </summary>
+        /// <remarks>
+        /// A fresh clone has no modified paths, so the natural starting cone is minimal: root
+        /// files only ("/*", "!/*/"). The steps are:
+        ///   1. Build the minimal cone (empty modified-path set) with W6's ConeBuilder and write
+        ///      it to the per-worktree info/sparse-checkout in git's exact cone format.
+        ///   2. Set core.sparseCheckout=true so git applies the cone when it rewrites the index.
+        ///      The three sparse-index keys (core.sparseCheckoutCone, index.sparse,
+        ///      sparse.expectFilesOutsideOfPatterns) are already written by
+        ///      TrySetRequiredGitConfigSettings when SparseIndex is true.
+        ///   3. Collapse the just-written full index in place with 'update-index
+        ///      --force-write-index' (GVFS hooks disabled). This is cheap because the fresh index
+        ///      has skip-worktree on every entry and a valid cache-tree, so git collapses every
+        ///      out-of-cone directory without walking the working tree.
+        /// See decisions/0015 for why direct construction during checkout is infeasible with
+        /// stock git, and why 'update-index --force-write-index' is used instead of
+        /// 'sparse-checkout reapply'.
+        /// </remarks>
+        private bool TryConstructSparseIndex(ITracer tracer, GVFSEnlistment enlistment, GitProcess git, PhysicalFileSystem fileSystem, out string errorMessage)
+        {
+            errorMessage = null;
+
+            GitIndexInfo before;
+            string beforeError;
+            bool readBefore = GitIndexInspector.TryReadIndexInfo(enlistment.GitIndexPath, out before, out beforeError);
+
+            // 1. A fresh clone has no modified paths, so the minimal cone is root files only.
+            ConePatternSet cone = ConeBuilder.BuildFromModifiedPaths(Array.Empty<string>());
+            string sparseCheckoutPath = SparseCheckoutPathResolver.GetSparseCheckoutFilePath(enlistment);
+            string backupPath;
+            Exception writeException;
+            if (!new ConeFileWriter(fileSystem).TryWrite(sparseCheckoutPath, cone, out backupPath, out writeException))
+            {
+                errorMessage = "Unable to write the sparse-checkout cone file: " + (writeException != null ? writeException.Message : "unknown error");
+                return false;
+            }
+
+            // 2. Enable cone-mode sparse checkout so git applies the cone when it rewrites the index.
+            GitProcess.Result setSparseCheckout = git.SetInLocalConfig(GitConfigSetting.CoreSparseCheckoutName, "true");
+            if (setSparseCheckout.ExitCodeIsFailure)
+            {
+                errorMessage = "Unable to enable cone-mode sparse checkout: " + setSparseCheckout.Errors;
+                return false;
+            }
+
+            // 3. Collapse the full index to a sparse index in place, with the GVFS hooks disabled.
+            GitProcess.Result collapseResult = git.CollapseSparseIndex();
+            if (collapseResult.ExitCodeIsFailure)
+            {
+                errorMessage = "Unable to collapse the index to a sparse index: " + collapseResult.Errors;
+                return false;
+            }
+
+            GitIndexInfo after;
+            string afterError;
+            if (GitIndexInspector.TryReadIndexInfo(enlistment.GitIndexPath, out after, out afterError))
+            {
+                EventMetadata metadata = new EventMetadata();
+                metadata.Add("IsSparse", after.IsSparse);
+                metadata.Add("EntryCount", after.EntryCount);
+                metadata.Add("SizeInBytes", after.SizeInBytes);
+                if (readBefore)
+                {
+                    metadata.Add("EntryCountBefore", before.EntryCount);
+                    metadata.Add("SizeInBytesBefore", before.SizeInBytes);
+                }
+
+                tracer.RelatedEvent(EventLevel.Informational, "SparseIndexConstructed", metadata);
+
+                if (!after.IsSparse)
+                {
+                    // The collapse ran but produced a full index. This is expected only for a
+                    // repository with no out-of-cone directories to collapse; warn, do not fail.
+                    tracer.RelatedWarning("Clone-time sparse construction left a full index; the repository may have no directories to collapse.");
+                }
+            }
+            else
+            {
+                tracer.RelatedWarning("Could not read the index after clone-time sparse construction: " + afterError);
+            }
+
+            return true;
+        }
+
         private void CreateGitScript(GVFSEnlistment enlistment)
         {
             FileInfo gitCmd = new FileInfo(Path.Combine(enlistment.PrimaryEnlistmentRoot, "git.cmd"));
