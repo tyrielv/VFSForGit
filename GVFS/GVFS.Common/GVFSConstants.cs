@@ -81,6 +81,55 @@ namespace GVFS.Common
 
             public const string PrefetchOffload = GVFSPrefix + "prefetch-offload";
             public const bool PrefetchOffloadDefault = false;
+
+            /* Gates automatic sparse-index cone management in the mount process. When
+             * false (default), GVFS keeps today's sparse-checkout file and modified-path
+             * behavior. When true, the mount maps modified paths to a git cone-mode
+             * sparse-checkout pattern set so the git index can collapse to a sparse index
+             * while the ProjFS projection stays full. The feature is experimental and off
+             * by default; it gates the runtime entry point, not the build, so the cone
+             * builder and writer keep compiling and getting exercised by unit tests. */
+            public const string AutoSparseIndex = GVFSPrefix + "auto-sparse-index";
+            public const bool AutoSparseIndexDefault = false;
+
+            /* Opt-in refinement to cone construction. When set, the cone builder collapses a
+             * parent-only ancestor chain into a single recursive include wherever doing so is
+             * entry neutral, which cuts pattern count and cone churn for a directory that is
+             * being worked wholesale. It does not shrink the index, so it is off by default and
+             * only meaningful when AutoSparseIndex is also on. */
+            public const string SparseIndexConeGranularity = GVFSPrefix + "sparse-index-cone-granularity";
+            public const bool SparseIndexConeGranularityDefault = false;
+        }
+
+        /// <summary>
+        /// Timing budgets for automatic sparse-index cone management. Shared by the
+        /// pre/post-command hook (which waits, bounded, for the mount's reply) and the
+        /// mount-side handler (which warns when the hook-blocking work exceeds the budget,
+        /// so a soft-guarantee breach is visible in the mount log rather than silent).
+        /// </summary>
+        public static class ConeManagement
+        {
+            // How long the pre-command hook waits for a widen reply before it abandons the
+            // wait and lets Git run. The mount replies as soon as the on-disk index is
+            // widened (the projection reparse is decoupled onto the background parse
+            // thread), so this budget covers only the O(cone) index write, not the
+            // O(repo) reparse tail. The index write is roughly scale-independent
+            // (measured flat ~150 ms at ForTests scale, dominated by the Git process
+            // spawn), so a single fixed budget covers every repo size. Task.Wait returns
+            // as soon as the reply arrives, so a fast widen never pays this full budget;
+            // the headroom is only spent when a cold, large-repo widen genuinely runs
+            // long -- exactly when waiting is worth it to prevent a multi-second index
+            // expansion.
+            public const int WidenHookWaitBudgetMs = 1000;
+
+            // The post-command narrow is cleanup after Git already ran, so it is not on
+            // the user's critical path. A narrow that times out only leaves the cone
+            // transiently wider than necessary until the next narrow, which is benign.
+            public const int NarrowHookWaitBudgetMs = 100;
+
+            // Connecting to a live mount is fast; a dead mount fails the connect quickly
+            // rather than consuming the whole wait budget.
+            public const int ConnectTimeoutMs = 50;
         }
 
         public static class LocalGVFSConfig
@@ -137,6 +186,7 @@ namespace GVFS.Common
             public const string Repair = "repair";
             public const string Service = "service";
             public const string Sparse = "sparse";
+            public const string SparseIndex = "sparse_index";
             public const string UpgradeVerb = UpgradePrefix + "_verb";
             public const string UpgradeProcess = UpgradePrefix + "_process";
             public const string UpgradeSystemInstaller = UpgradePrefix + "_system_installer";

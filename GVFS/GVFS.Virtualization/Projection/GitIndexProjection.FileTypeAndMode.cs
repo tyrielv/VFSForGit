@@ -14,6 +14,11 @@ namespace GVFS.Virtualization.Projection
             private const ushort SymLinkFileIndexEntry = 0xA000;
             private const ushort GitLinkFileIndexEntry = 0xE000;
 
+            // A sparse-directory entry (git index.sparse) has mode 040000. It stands in for a
+            // collapsed subtree. Recognise it on every platform so that mode-parsing platforms
+            // (e.g. macOS) do not reject the index as an invalid file type.
+            private const ushort DirectoryIndexEntry = 0x4000;
+
             public FileTypeAndMode(ushort typeAndModeInIndexFormat)
             {
                 switch (typeAndModeInIndexFormat & FileTypeMask)
@@ -26,6 +31,9 @@ namespace GVFS.Virtualization.Projection
                         break;
                     case GitLinkFileIndexEntry:
                         this.Type = FileType.GitLink;
+                        break;
+                    case DirectoryIndexEntry:
+                        this.Type = FileType.Directory;
                         break;
                     default:
                         this.Type = FileType.Invalid;

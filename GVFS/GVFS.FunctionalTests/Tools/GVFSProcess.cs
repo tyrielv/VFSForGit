@@ -35,14 +35,37 @@ namespace GVFS.FunctionalTests.Tools
 
         public void Clone(string repositorySource, string branchToCheckout, bool skipPrefetch)
         {
+            this.Clone(repositorySource, branchToCheckout, skipPrefetch, sparseIndex: false, noMount: false);
+        }
+
+        public void Clone(string repositorySource, string branchToCheckout, bool skipPrefetch, bool sparseIndex, bool noMount)
+        {
             string args = string.Format(
-                "clone \"{0}\" \"{1}\" --branch \"{2}\" --local-cache-path \"{3}\" {4}",
+                "clone \"{0}\" \"{1}\" --branch \"{2}\" --local-cache-path \"{3}\" {4} {5} {6}",
                 repositorySource,
                 this.enlistmentRoot,
                 branchToCheckout,
                 this.localCacheRoot,
-                skipPrefetch ? "--no-prefetch" : string.Empty);
+                skipPrefetch ? "--no-prefetch" : string.Empty,
+                sparseIndex ? "--sparse-index" : string.Empty,
+                noMount ? "--no-mount" : string.Empty);
             this.CallGVFS(args, expectedExitCode: SuccessExitCode);
+        }
+
+        /// <summary>
+        /// Runs 'gvfs clone --sparse-index --no-mount' expecting it to fail, and returns the captured
+        /// output. Used by the fail-fast test that asserts 'gvfs clone --sparse-index' is rejected
+        /// when the configured git does not advertise the sparse-index capability.
+        /// </summary>
+        public string CloneSparseIndexExpectingFailure(string repositorySource, string branchToCheckout)
+        {
+            string args = string.Format(
+                "clone \"{0}\" \"{1}\" --branch \"{2}\" --local-cache-path \"{3}\" --no-mount --sparse-index",
+                repositorySource,
+                this.enlistmentRoot,
+                branchToCheckout,
+                this.localCacheRoot);
+            return this.CallGVFS(args, expectedExitCode: ExitCodeShouldNotBeZero);
         }
 
         public void Mount()

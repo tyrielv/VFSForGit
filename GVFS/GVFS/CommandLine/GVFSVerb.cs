@@ -98,7 +98,12 @@ namespace GVFS.CommandLine
 
         public static bool TrySetRequiredGitConfigSettings(GVFSEnlistment enlistment)
         {
-            Dictionary<string, string> requiredSettings = RequiredGitConfig.GetRequiredSettings(enlistment);
+            return TrySetRequiredGitConfigSettings(enlistment, autoSparseIndexEnabled: false);
+        }
+
+        public static bool TrySetRequiredGitConfigSettings(GVFSEnlistment enlistment, bool autoSparseIndexEnabled)
+        {
+            Dictionary<string, string> requiredSettings = RequiredGitConfig.GetRequiredSettings(enlistment, autoSparseIndexEnabled);
 
             if (!TrySetConfig(enlistment, requiredSettings, isRequired: true))
             {

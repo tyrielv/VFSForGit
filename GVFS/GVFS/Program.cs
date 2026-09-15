@@ -95,6 +95,7 @@ namespace GVFS
             rootCommand.Add(RepairVerb.CreateCommand());
             rootCommand.Add(ServiceVerb.CreateCommand());
             rootCommand.Add(SparseVerb.CreateCommand());
+            rootCommand.Add(SparseIndexVerb.CreateCommand());
             rootCommand.Add(StatusVerb.CreateCommand());
             rootCommand.Add(UnmountVerb.CreateCommand());
             rootCommand.Add(UpgradeVerb.CreateCommand());

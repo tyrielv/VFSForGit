@@ -61,6 +61,12 @@ namespace GVFS.Virtualization.Projection
         private SparseFolderData rootSparseFolder;
         private GVFSGitObjects gitObjects;
         private BackgroundFileSystemTaskRunner backgroundFileSystemTaskRunner;
+
+        // When true, a sparse-directory entry (git index.sparse) is expanded into the projection
+        // by reading (and if needed downloading) its collapsed tree. When false (default), such an
+        // entry fails the projection build. Gated by gvfs.auto-sparse-index, read once at construction.
+        private bool sparseIndexExpansionEnabled;
+        private SparseDirectoryExpander sparseDirectoryExpander;
         private ReaderWriterLockSlim projectionReadWriteLock;
         private ManualResetEventSlim projectionParseComplete;
 
@@ -116,6 +122,18 @@ namespace GVFS.Virtualization.Projection
             this.rootSparseFolder = new SparseFolderData();
             this.ClearProjectionCaches();
 
+            this.sparseIndexExpansionEnabled = this.context.Repository != null
+                && this.context.Repository.GetConfigBoolOrDefault(GVFSConstants.GitConfig.AutoSparseIndex, GVFSConstants.GitConfig.AutoSparseIndexDefault);
+            if (this.sparseIndexExpansionEnabled)
+            {
+                this.sparseDirectoryExpander = new SparseDirectoryExpander(
+                    this.context.Tracer,
+                    new LibGit2ProjectionTreeReader(this.context.Repository, this.gitObjects),
+                    GVFSPlatform.Instance.FileSystem.SupportsFileMode,
+                    this.rootSparseFolder,
+                    this.nonDefaultFileTypesAndModes);
+            }
+
             LocalGVFSConfig config = new LocalGVFSConfig();
             if (config.TryGetConfig(GVFSConstants.LocalGVFSConfig.USNJournalUpdates, out string value, out string error))
             {
@@ -135,6 +153,10 @@ namespace GVFS.Virtualization.Projection
             Regular,
             SymLink,
             GitLink,
+
+            // Sparse-directory entry in a sparse index (git index.sparse). Mode 040000, a
+            // tree OID, and the skip-worktree bit. It stands in for a collapsed subtree.
+            Directory,
         }
 
         public enum PathSparseState
@@ -976,6 +998,92 @@ namespace GVFS.Virtualization.Projection
             parentFolder.AddChildFile(indexEntry.BuildingProjection_PathParts[indexEntry.BuildingProjection_NumParts - 1], indexEntry.Sha);
 
             return parentFolder;
+        }
+
+        /// <summary>
+        /// True when a sparse-directory entry (git index.sparse) should be expanded into the
+        /// projection instead of failing the build. Gated by gvfs.auto-sparse-index.
+        /// </summary>
+        internal bool SparseIndexExpansionEnabled
+        {
+            get { return this.sparseIndexExpansionEnabled; }
+        }
+
+        /// <summary>
+        /// Create the collapsed folder for a sparse-directory entry (and any missing ancestor
+        /// folders), returning the collapsed folder's FolderData. Unlike <see cref="AddFileToTree"/>,
+        /// this creates the final path part as a folder, because a sparse-directory entry names a
+        /// folder rather than a file.
+        /// </summary>
+        private FolderData AddSparseDirectoryToTree(GitIndexEntry indexEntry)
+        {
+            FolderData parentFolder = this.rootFolderData;
+            for (int pathIndex = 0; pathIndex < indexEntry.BuildingProjection_NumParts; ++pathIndex)
+            {
+                parentFolder = parentFolder.ChildEntries.GetOrAddFolder(
+                    indexEntry.BuildingProjection_PathParts,
+                    pathIndex,
+                    parentFolder.IsIncluded,
+                    this.rootSparseFolder);
+            }
+
+            return parentFolder;
+        }
+
+        /// <summary>
+        /// Expand a sparse-directory entry's collapsed subtree into the projection. Only called
+        /// when <see cref="sparseIndexExpansionEnabled"/> is true.
+        /// </summary>
+        private void ExpandSparseDirectory(GitIndexEntry indexEntry)
+        {
+            // Parse the collapsed folder path without its trailing '/'. ClearLastParent forces a
+            // full parse and leaves the next entry to do its own full parse (the previous-separator
+            // state is reset), so index-v4 prefix decompression stays correct.
+            indexEntry.ClearLastParent();
+            indexEntry.BuildingProjection_ParsePath(indexEntry.ProjectionPathLength);
+
+            FolderData collapsedFolder = this.AddSparseDirectoryToTree(indexEntry);
+
+            string collapsedGitPath = GVFSPlatform.Instance.FileSystem.SupportsFileMode
+                ? indexEntry.BuildingProjection_GetGitRelativePath()
+                : null;
+
+            string treeSha = SHA1Util.HexStringFromBytes(indexEntry.Sha);
+            FrameInclusion rootInclusion = this.ComputeCollapsedFolderInclusion(indexEntry);
+
+            this.sparseDirectoryExpander.Expand(collapsedFolder, collapsedGitPath, treeSha, rootInclusion);
+
+            indexEntry.ClearLastParent();
+        }
+
+        /// <summary>
+        /// Compute the gvfs sparse-cone inclusion frame for a collapsed folder by walking the
+        /// sparse root over its path parts, mirroring <see cref="SortedFolderEntries.GetOrAddFolder"/>.
+        /// </summary>
+        private FrameInclusion ComputeCollapsedFolderInclusion(GitIndexEntry indexEntry)
+        {
+            if (this.rootSparseFolder.Children.Count == 0)
+            {
+                return FrameInclusion.AllIncluded;
+            }
+
+            SparseFolderData node = this.rootSparseFolder;
+            int numParts = indexEntry.BuildingProjection_NumParts;
+            for (int i = 0; i < numParts; i++)
+            {
+                if (node.IsRecursive)
+                {
+                    return FrameInclusion.AllIncluded;
+                }
+
+                string partName = indexEntry.BuildingProjection_PathParts[i].GetString();
+                if (!node.Children.TryGetValue(partName, out node))
+                {
+                    return FrameInclusion.Excluded;
+                }
+            }
+
+            return new FrameInclusion(included: true, recursive: node.IsRecursive, node: node);
         }
 
         private FolderEntryData GetProjectedFolderEntryData(
