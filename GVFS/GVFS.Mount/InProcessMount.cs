@@ -73,6 +73,15 @@ namespace GVFS.Mount
         // a folder dehydrate request
         private volatile bool resetForDehydrateInProgress;
 
+        // Whether gvfs.auto-sparse-index is enabled for this enlistment, read once while
+        // setting required git config. When false (the default), cone-management requests
+        // reply NotEnabled and current behaviour is byte-for-byte unchanged.
+        private bool autoSparseIndexEnabled;
+
+        // Handles ConeWiden/ConeNarrow requests when auto-sparse-index is enabled. Created
+        // when the working-directory callbacks start; null when the feature is off.
+        private AutoSparseIndexConeManager coneManager;
+
         public InProcessMount(ITracer tracer, GVFSEnlistment enlistment, CacheServerInfo cacheServer, RetryConfig retryConfig, GitStatusCacheConfig gitStatusCacheConfig, bool showDebugWindow)
         {
             this.tracer = tracer;
@@ -745,6 +754,14 @@ namespace GVFS.Mount
                         this.HandleGetHydrationStatusRequest(connection);
                         break;
 
+                    case NamedPipeMessages.ConeManagement.WidenRequest:
+                        this.HandleConeWiden(message, connection);
+                        break;
+
+                    case NamedPipeMessages.ConeManagement.NarrowRequest:
+                        this.HandleConeNarrow(message, connection);
+                        break;
+
                     default:
                         EventMetadata metadata = new EventMetadata();
                         metadata.Add("Area", "Mount");
@@ -792,6 +809,87 @@ namespace GVFS.Mount
 
             connection.TrySendResponse(
                 new NamedPipeMessages.Message(NamedPipeMessages.HydrationStatus.SuccessResult, response.ToBody()));
+        }
+
+        private void HandleConeWiden(NamedPipeMessages.Message message, NamedPipeServer.Connection connection)
+        {
+            if (!this.TryBeginConeRequest(out string notReadyResult))
+            {
+                connection.TrySendResponse(new NamedPipeMessages.Message(notReadyResult, string.Empty));
+                return;
+            }
+
+            if (!NamedPipeMessages.ConeManagement.WidenParameters.TryParse(message.Body, out NamedPipeMessages.ConeManagement.WidenParameters parameters))
+            {
+                this.tracer.RelatedError($"{nameof(this.HandleConeWiden)}: Failed to parse widen request body");
+                connection.TrySendResponse(new NamedPipeMessages.Message(NamedPipeMessages.ConeManagement.FailureResult, string.Empty));
+                return;
+            }
+
+            bool succeeded = this.coneManager.TryWiden(parameters, out string error);
+            this.SendConeResult(nameof(this.HandleConeWiden), connection, succeeded, error);
+        }
+
+        private void HandleConeNarrow(NamedPipeMessages.Message message, NamedPipeServer.Connection connection)
+        {
+            if (!this.TryBeginConeRequest(out string notReadyResult))
+            {
+                connection.TrySendResponse(new NamedPipeMessages.Message(notReadyResult, string.Empty));
+                return;
+            }
+
+            if (!NamedPipeMessages.ConeManagement.NarrowParameters.TryParse(message.Body, out NamedPipeMessages.ConeManagement.NarrowParameters parameters))
+            {
+                this.tracer.RelatedError($"{nameof(this.HandleConeNarrow)}: Failed to parse narrow request body");
+                connection.TrySendResponse(new NamedPipeMessages.Message(NamedPipeMessages.ConeManagement.FailureResult, string.Empty));
+                return;
+            }
+
+            bool succeeded = this.coneManager.TryNarrow(parameters, out string error);
+            this.SendConeResult(nameof(this.HandleConeNarrow), connection, succeeded, error);
+        }
+
+        /// <summary>
+        /// Gates a cone-management request. Returns false with the result the caller must
+        /// reply when the feature is off (NotEnabled) or the mount is not ready
+        /// (MountNotReady). Returns true, leaving <paramref name="notReadyResult"/> null,
+        /// when the request may proceed to the cone manager.
+        /// </summary>
+        private bool TryBeginConeRequest(out string notReadyResult)
+        {
+            if (!this.autoSparseIndexEnabled || this.coneManager == null)
+            {
+                // Feature off: reply NotEnabled so the hook proceeds and behaviour is
+                // byte-for-byte unchanged.
+                notReadyResult = NamedPipeMessages.ConeManagement.NotEnabledResult;
+                return false;
+            }
+
+            if (this.currentState != MountState.Ready)
+            {
+                notReadyResult = NamedPipeMessages.MountNotReadyResult;
+                return false;
+            }
+
+            notReadyResult = null;
+            return true;
+        }
+
+        private void SendConeResult(string caller, NamedPipeServer.Connection connection, bool succeeded, string error)
+        {
+            if (!succeeded)
+            {
+                EventMetadata metadata = new EventMetadata();
+                metadata.Add("Area", "Mount");
+                metadata.Add("Error", error);
+                this.tracer.RelatedError(metadata, $"{caller}: Cone request failed");
+            }
+
+            string resultHeader = succeeded
+                ? NamedPipeMessages.ConeManagement.SuccessResult
+                : NamedPipeMessages.ConeManagement.FailureResult;
+
+            connection.TrySendResponse(new NamedPipeMessages.Message(resultHeader, string.Empty));
         }
 
         private void HandleDehydrateFolders(NamedPipeMessages.Message message, NamedPipeServer.Connection connection)
@@ -1563,6 +1661,12 @@ namespace GVFS.Mount
 
             this.heartbeat = new HeartbeatThread(this.tracer, this.fileSystemCallbacks);
             this.heartbeat.Start();
+
+            // Wire the on-demand cone handler only when auto-sparse-index is enabled, so
+            // that with the feature off no cone state exists and requests reply NotEnabled.
+            this.coneManager = this.autoSparseIndexEnabled
+                ? new AutoSparseIndexConeManager(this.context, this.fileSystemCallbacks)
+                : null;
         }
 
         private void ValidateGitVersion()
@@ -1903,6 +2007,8 @@ namespace GVFS.Mount
                 this.enlistment.WorkingDirectoryBackingRoot,
                 GVFSConstants.GitConfig.AutoSparseIndex,
                 GVFSConstants.GitConfig.AutoSparseIndexDefault);
+
+            this.autoSparseIndexEnabled = autoSparseIndexEnabled;
 
             Dictionary<string, string> requiredSettings = RequiredGitConfig.GetRequiredSettings(this.enlistment, autoSparseIndexEnabled);
 
