@@ -165,7 +165,7 @@ namespace GVFS.Common
 
             if (index >= tokens.Count)
             {
-                return new ParsedGitCommand(null, null, null, false, false, changeDirectory, gitDir, workTree);
+                return new ParsedGitCommand(null, null, null, null, false, false, changeDirectory, gitDir, workTree);
             }
 
             string command = NormalizeCommand(tokens[index]);
@@ -187,6 +187,7 @@ namespace GVFS.Common
             List<string> pathspecs = new List<string>();
             string pathspecFromFile = null;
             bool pathspecFileNul = false;
+            string subcommand = null;
 
             bool pastDashDash = false;
             bool captureNextAsPathspecFile = false;
@@ -271,7 +272,13 @@ namespace GVFS.Common
                         continue;
                     }
 
-                    // A positional (non-option) argument.
+                    // A positional (non-option) argument. The first positional is the
+                    // subcommand for subcommand-style commands (sparse-checkout, stash, ...).
+                    if (positionalIndex == 0)
+                    {
+                        subcommand = token;
+                    }
+
                     ClassifyPositional(spec, token, positionalIndex, pathspecs, ref stashTakesPaths);
                     positionalIndex++;
                 }
@@ -290,6 +297,7 @@ namespace GVFS.Common
 
             return new ParsedGitCommand(
                 command,
+                subcommand,
                 pathspecs,
                 pathspecFromFile,
                 pathspecFileNul,

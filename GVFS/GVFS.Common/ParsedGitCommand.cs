@@ -12,6 +12,7 @@ namespace GVFS.Common
 
         public ParsedGitCommand(
             string command,
+            string subcommand,
             IReadOnlyList<string> pathspecs,
             string pathspecFromFile,
             bool pathspecFileNul,
@@ -21,6 +22,7 @@ namespace GVFS.Common
             string workTree)
         {
             this.Command = command;
+            this.Subcommand = subcommand;
             this.Pathspecs = pathspecs ?? NoPathspecs;
             this.PathspecFromFile = pathspecFromFile;
             this.PathspecFileNul = pathspecFileNul;
@@ -32,10 +34,20 @@ namespace GVFS.Common
 
         /// <summary>An empty result, returned when there is nothing to parse.</summary>
         public static ParsedGitCommand Empty { get; } =
-            new ParsedGitCommand(null, NoPathspecs, null, false, false, null, null, null);
+            new ParsedGitCommand(null, null, NoPathspecs, null, false, false, null, null, null);
 
         /// <summary>The Git command (verb), lowercased and with any "git-" prefix removed. Null when absent.</summary>
         public string Command { get; }
+
+        /// <summary>
+        /// The first positional (non-option) argument the command names, which for a
+        /// subcommand-style Git command (<c>sparse-checkout</c>, <c>stash</c>,
+        /// <c>worktree</c>, ...) is its subcommand. Lowercase is not forced, because Git
+        /// subcommand dispatch is case-sensitive. Null when the command names no
+        /// positional argument (for example <c>git sparse-checkout</c> alone, or when the
+        /// first token is an option or comes after <c>--</c>).
+        /// </summary>
+        public string Subcommand { get; }
 
         /// <summary>The literal pathspecs the command names, in command-line order.</summary>
         public IReadOnlyList<string> Pathspecs { get; }

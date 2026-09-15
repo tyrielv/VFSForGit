@@ -50,6 +50,10 @@ namespace GVFS.Mount
         private readonly string sparseCheckoutPath;
         private readonly string workingDirectoryRoot;
 
+        // The cone content GVFS last wrote this session, used to detect a hand-edit to the
+        // file GVFS owns. Null until GVFS writes the file once (see decisions/0020).
+        private string lastWrittenConeContent;
+
         public AutoSparseIndexConeManager(GVFSContext context, FileSystemCallbacks fileSystemCallbacks)
         {
             ArgumentNullException.ThrowIfNull(context);
@@ -193,10 +197,17 @@ namespace GVFS.Mount
             ConePatternSet cone = ConeBuilder.BuildFromModifiedPaths(allPaths);
             string newContent = ConeFileWriter.Serialize(cone);
 
-            if (this.ConeContentUnchanged(newContent))
+            // Read the on-disk cone once: used both to detect a hand-edit (drift) and to
+            // skip a redundant write. The file is small (a few KB even at os.2020 scale),
+            // so a read plus ordinal compare is cheap and never parses the file with git.
+            string currentContent = this.TryReadCurrentConeFile();
+            this.WarnIfConeFileDrifted(caller, currentContent);
+
+            if (string.Equals(currentContent, newContent, StringComparison.Ordinal))
             {
                 // The cone already covers these paths, so there is nothing to write and no
                 // projection rebuild to trigger. Current behaviour is byte-for-byte unchanged.
+                this.lastWrittenConeContent = newContent;
                 this.TraceApplied(caller, requestedPathCount, changed: false, stopwatch);
                 return true;
             }
@@ -218,6 +229,10 @@ namespace GVFS.Mount
                 return false;
             }
 
+            // GVFS now owns the on-disk content, so record it as the drift baseline for the
+            // next recompute.
+            this.lastWrittenConeContent = newContent;
+
             // The collapse rewrote the index with hooks disabled, so the mount received no
             // PostIndexChanged notification. Reparse the projection so the GVFS view matches
             // the new on-disk cone before replying. The modified-paths set is unchanged.
@@ -227,22 +242,55 @@ namespace GVFS.Mount
             return true;
         }
 
-        private bool ConeContentUnchanged(string newContent)
+        /// <summary>
+        /// Reads the on-disk cone file, returning null when it is absent or unreadable. A
+        /// null result makes the caller fall through to a write, which is safe.
+        /// </summary>
+        private string TryReadCurrentConeFile()
         {
             if (!this.fileSystem.FileExists(this.sparseCheckoutPath))
             {
-                return false;
+                return null;
             }
 
             try
             {
-                return string.Equals(this.fileSystem.ReadAllText(this.sparseCheckoutPath), newContent, StringComparison.Ordinal);
+                return this.fileSystem.ReadAllText(this.sparseCheckoutPath);
             }
             catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
             {
-                // If the current content cannot be read, fall through to a write; a
-                // redundant write is safe.
-                return false;
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Warns when the on-disk cone file was edited outside GVFS. GVFS owns the file and
+        /// overwrites the edit (warn-and-overwrite, decisions/0020). A non-cone hand-edit
+        /// gets its own warning, because it silently disables the sparse index via git's
+        /// <c>is_sparse_index_allowed()</c>. The warning goes to the mount trace; the
+        /// mount handler has no interactive user channel.
+        /// </summary>
+        private void WarnIfConeFileDrifted(string caller, string currentContent)
+        {
+            if (ConeDriftDetector.IsNonConeFormat(currentContent))
+            {
+                EventMetadata metadata = this.CreateEventMetadata();
+                metadata.Add("CurrentLength", currentContent?.Length ?? 0);
+                metadata.Add(
+                    TracingConstants.MessageKey.WarningMessage,
+                    $"{caller}: .git/info/sparse-checkout was hand-edited to a non-cone pattern, which silently disables the sparse index (git's is_sparse_index_allowed requires cone patterns). GVFS owns this file and is restoring a cone-format file.");
+                this.tracer.RelatedWarning(metadata, $"{caller}_ConeFileNonConeFormat");
+                return;
+            }
+
+            if (ConeDriftDetector.HasDrifted(this.lastWrittenConeContent, currentContent))
+            {
+                EventMetadata metadata = this.CreateEventMetadata();
+                metadata.Add("CurrentLength", currentContent?.Length ?? 0);
+                metadata.Add(
+                    TracingConstants.MessageKey.WarningMessage,
+                    $"{caller}: .git/info/sparse-checkout was edited outside GVFS. GVFS owns this file and is overwriting the change.");
+                this.tracer.RelatedWarning(metadata, $"{caller}_ConeFileDrift");
             }
         }
 
