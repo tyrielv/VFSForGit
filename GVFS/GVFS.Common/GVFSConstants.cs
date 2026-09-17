@@ -198,6 +198,13 @@ namespace GVFS.Common
             public const string LogName = "logs";
             public const string MountLock = "mount.lock";
 
+            /// <summary>
+            /// A full index written during clone so the first mount can parse a projection
+            /// instead of walking every collapsed sparse directory. Consumed and deleted by the
+            /// first projection build. See decisions/0022.
+            /// </summary>
+            public const string ProjectionIndexSeedName = "GVFS_projection_seed";
+
             public static class Databases
             {
                 public const string Name = "databases";

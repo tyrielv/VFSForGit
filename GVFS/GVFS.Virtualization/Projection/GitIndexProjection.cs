@@ -23,6 +23,13 @@ namespace GVFS.Virtualization.Projection
     {
         public const string ProjectionIndexBackupName = "GVFS_projection";
 
+        /// <summary>
+        /// A full index written during clone so the first projection can be parsed instead of
+        /// walking every collapsed tree. Consumed and deleted on the first mount. See
+        /// decisions/0022.
+        /// </summary>
+        public const string ProjectionIndexSeedName = GVFSConstants.DotGVFS.ProjectionIndexSeedName;
+
         public static readonly ushort FileMode755 = Convert.ToUInt16("755", 8);
         public static readonly ushort FileMode664 = Convert.ToUInt16("664", 8);
         public static readonly ushort FileMode644 = Convert.ToUInt16("644", 8);
@@ -2031,8 +2038,86 @@ namespace GVFS.Virtualization.Projection
 
         private void CopyIndexFileAndBuildProjection()
         {
+            // A clone-time seed index lets the first projection be parsed from a full index
+            // instead of walking every collapsed tree. The seed is written during clone, while
+            // the trees are being read anyway; without it a sparse clone must read them again,
+            // cold, on first mount. See decisions/0022.
+            string seedPath = Path.Combine(this.context.Enlistment.DotGVFSRoot, ProjectionIndexSeedName);
+            if (this.context.FileSystem.FileExists(seedPath))
+            {
+                if (this.TryBuildProjectionFromSeed(seedPath))
+                {
+                    return;
+                }
+            }
+
             this.context.FileSystem.CopyFile(this.indexPath, this.projectionIndexBackupPath, overwrite: true);
             this.BuildProjection();
+        }
+
+        /// <summary>
+        /// Build the first projection from a clone-time seed index.
+        /// </summary>
+        /// <remarks>
+        /// The seed is produced by <c>git read-tree</c>, so it holds every entry but no
+        /// skip-worktree bits. That is expected: under a virtual filesystem the bit is recomputed
+        /// on every index read rather than stored, so the parser reconstructs it (see
+        /// <c>GitIndexParser.EntryIsProjected</c>).
+        /// <para>
+        /// The seed is consumed at most once. It is deleted whether or not the parse succeeds, so
+        /// a stale or corrupt seed can never affect a later mount, and any failure falls back to
+        /// the normal path rather than leaving the mount without a projection.
+        /// </para>
+        /// </remarks>
+        private bool TryBuildProjectionFromSeed(string seedPath)
+        {
+            try
+            {
+                using (ITracer tracer = this.context.Tracer.StartActivity("ParseGitIndexSeed", EventLevel.Informational))
+                {
+                    try
+                    {
+                        this.context.FileSystem.CopyFile(seedPath, this.projectionIndexBackupPath, overwrite: true);
+
+                        this.SetProjectionInvalid(false);
+                        using (FileStream indexStream = new FileStream(this.projectionIndexBackupPath, FileMode.Open, FileAccess.Read, FileShare.Read, IndexFileStreamBufferSize))
+                        {
+                            this.indexParser.RebuildProjection(
+                                tracer,
+                                indexStream,
+                                seedMode: true,
+                                materializedPaths: this.modifiedPaths.GetAllModifiedPaths());
+                        }
+
+                        EventMetadata metadata = CreateEventMetadata();
+                        metadata.Add(TracingConstants.MessageKey.InfoMessage, "Built the first projection from the clone-time seed index");
+                        tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_Used", metadata);
+                        return true;
+                    }
+                    catch (Exception e)
+                    {
+                        // The seed is an optimization. Any failure must fall back to the normal
+                        // build rather than fail the mount.
+                        EventMetadata metadata = CreateEventMetadata(e);
+                        metadata.Add(TracingConstants.MessageKey.WarningMessage, "Failed to build the projection from the seed index; falling back to the index");
+                        tracer.RelatedEvent(EventLevel.Warning, "ProjectionSeed_Failed", metadata);
+                        return false;
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    this.context.FileSystem.DeleteFile(seedPath);
+                }
+                catch (Exception e)
+                {
+                    EventMetadata metadata = CreateEventMetadata(e);
+                    metadata.Add(TracingConstants.MessageKey.InfoMessage, "Failed to delete the seed index");
+                    this.context.Tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_DeleteFailed", metadata);
+                }
+            }
         }
 
         private void BuildProjection()

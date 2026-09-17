@@ -620,6 +620,46 @@ namespace GVFS.Common.Git
             return this.InvokeGitInWorkingDirectoryRoot("checkout -f " + target, useReadObjectHook: false);
         }
 
+        /// <summary>
+        /// Write a full (non-sparse) index for HEAD to <paramref name="seedPath"/> without
+        /// touching the working tree or the repository's own index.
+        /// </summary>
+        /// <remarks>
+        /// Used at clone time as a projection seed. A sparse clone never reads the collapsed
+        /// trees, so the first mount would otherwise have to read them cold; writing this seed
+        /// while the clone is already running lets the first projection be parsed instead.
+        /// <para>
+        /// <c>GIT_INDEX_FILE</c> points git at the seed for both reading and writing, so it never
+        /// locks the repository's own index and can run alongside the clone's checkout.
+        /// <c>--index-output</c> is not sufficient: it redirects only the write, and git still
+        /// takes <c>.git/index.lock</c>, which fails the concurrent checkout with
+        /// "Unable to create index.lock: File exists". <c>read-tree</c> writes no working-tree
+        /// files, so there is no working-tree contention either.
+        /// <para>
+        /// The seed carries no skip-worktree bits -- under a virtual filesystem those are
+        /// recomputed on every index read rather than stored, and the parser reconstructs them
+        /// when it consumes the seed. See decisions/0022.
+        /// </para>
+        /// <para>
+        /// The read-object hook is disabled to match <see cref="ForceCheckout"/>: during clone it
+        /// is not yet available. A missing tree therefore fails this command, which is safe --
+        /// the seed is an optimization and the caller ignores failure.
+        /// </para>
+        /// </remarks>
+        public Result WriteProjectionSeedIndex(string seedPath)
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.IndexSparseName + "=false read-tree HEAD",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: false,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false,
+                indexFileOverride: seedPath);
+        }
+
         public Result Reset(string target, string paths)
         {
             return this.InvokeGitInWorkingDirectoryRoot($"reset {target} {paths}", useReadObjectHook: false);
@@ -1099,6 +1139,11 @@ namespace GVFS.Common.Git
 
         public Process GetGitProcess(string command, string workingDirectory, string dotGitDirectory, bool useReadObjectHook, string gitObjectsDirectory, bool usePreCommandHook)
         {
+            return this.GetGitProcess(command, workingDirectory, dotGitDirectory, useReadObjectHook, gitObjectsDirectory, usePreCommandHook, indexFileOverride: null);
+        }
+
+        public Process GetGitProcess(string command, string workingDirectory, string dotGitDirectory, bool useReadObjectHook, string gitObjectsDirectory, bool usePreCommandHook, string indexFileOverride)
+        {
             ProcessStartInfo processInfo = new ProcessStartInfo(this.gitBinPath);
             processInfo.WorkingDirectory = workingDirectory;
             processInfo.UseShellExecute = false;
@@ -1159,6 +1204,14 @@ namespace GVFS.Common.Git
                 processInfo.EnvironmentVariables["COMMAND_HOOK_LOCK"] = "true";
             }
 
+            if (!string.IsNullOrEmpty(indexFileOverride))
+            {
+                // Point git at a different index for both reading and writing. --index-output only
+                // redirects the write: git still locks the repository's own index, which makes a
+                // concurrent checkout fail with "Unable to create index.lock: File exists".
+                processInfo.EnvironmentVariables["GIT_INDEX_FILE"] = indexFileOverride;
+            }
+
             if (!string.IsNullOrEmpty(dotGitDirectory))
             {
                 command = "--git-dir=\"" + dotGitDirectory + "\" " + command;
@@ -1181,7 +1234,8 @@ namespace GVFS.Common.Git
             Action<string> parseStdOutLine,
             int timeoutMs,
             string gitObjectsDirectory = null,
-            bool usePreCommandHook = true)
+            bool usePreCommandHook = true,
+            string indexFileOverride = null)
         {
             if (failedToSetEncoding && writeStdIn != null)
             {
@@ -1193,7 +1247,7 @@ namespace GVFS.Common.Git
                 // From https://msdn.microsoft.com/en-us/library/system.diagnostics.process.standardoutput.aspx
                 // To avoid deadlocks, use asynchronous read operations on at least one of the streams.
                 // Do not perform a synchronous read to the end of both redirected streams.
-                using (this.executingProcess = this.GetGitProcess(command, workingDirectory, dotGitDirectory, useReadObjectHook, gitObjectsDirectory: gitObjectsDirectory, usePreCommandHook: usePreCommandHook))
+                using (this.executingProcess = this.GetGitProcess(command, workingDirectory, dotGitDirectory, useReadObjectHook, gitObjectsDirectory: gitObjectsDirectory, usePreCommandHook: usePreCommandHook, indexFileOverride: indexFileOverride))
                 {
                     // Bound how much stdout/stderr we buffer so a pathologically noisy git command
                     // cannot grow these buffers without limit until GVFS.Mount hits an

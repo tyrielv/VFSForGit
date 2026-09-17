@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace GVFS.CommandLine
 {
@@ -764,6 +765,9 @@ namespace GVFS.CommandLine
                 return new Result(installHooksError);
             }
 
+            Task<GitProcess.Result> seedTask = null;
+            string seedPath = null;
+
             if (this.SparseIndex)
             {
                 // Establish the minimal cone and cone-mode sparse checkout BEFORE the checkout, so a
@@ -779,6 +783,22 @@ namespace GVFS.CommandLine
                     tracer.RelatedError(errorMessage);
                     return new Result(errorMessage);
                 }
+
+                // Write the projection seed alongside the checkout. The checkout below is cheap
+                // precisely because a sparse checkout never descends into the collapsed trees --
+                // which leaves them cold for the first mount's projection build. Reading them here
+                // overlaps that cost with the clone instead of paying it later. read-tree writes no
+                // working-tree files and targets its own index file, so it does not contend with
+                // the checkout. Failure is ignored: the mount falls back to building the projection
+                // from the trees. See decisions/0022.
+                seedPath = Path.Combine(enlistment.DotGVFSRoot, GVFSConstants.DotGVFS.ProjectionIndexSeedName);
+
+                // A separate GitProcess is required: GitProcess keeps the running child in an
+                // instance field (executingProcess), so two concurrent invocations on one instance
+                // overwrite each other and the loser reads the winner's streams. Sharing the
+                // instance here fails the clone with "StandardIn has not been redirected".
+                GitProcess seedGit = new GitProcess(enlistment);
+                seedTask = Task.Run(() => seedGit.WriteProjectionSeedIndex(seedPath));
             }
 
             GitProcess.Result forceCheckoutResult = git.ForceCheckout(branch);
@@ -824,6 +844,15 @@ namespace GVFS.CommandLine
                     tracer.RelatedError(error);
                     return new Result(error);
                 }
+            }
+
+            if (seedTask != null)
+            {
+                // The seed must be on disk before clone returns, because the first mount consumes
+                // it. Waiting here still overlaps its cost with the checkout above. Any failure is
+                // logged and ignored: without a seed the mount builds the projection from the
+                // trees, which is the behavior before this optimization.
+                this.WaitForProjectionSeed(tracer, seedTask, seedPath, fileSystem);
             }
 
             if (this.SparseIndex)
@@ -899,6 +928,63 @@ namespace GVFS.CommandLine
         /// is a hard prerequisite. See decisions/0015 "Alternative: cone before checkout" for the
         /// full matrix.
         /// </remarks>
+        /// <summary>
+        /// Wait for the clone-time projection seed and record the outcome.
+        /// </summary>
+        /// <remarks>
+        /// The seed is an optimization, so every failure path here is non-fatal: a missing seed
+        /// only means the first mount builds its projection by walking the collapsed trees, which
+        /// is what it did before. A partially written seed is deleted rather than left for the
+        /// mount to consume.
+        /// </remarks>
+        private void WaitForProjectionSeed(ITracer tracer, Task<GitProcess.Result> seedTask, string seedPath, PhysicalFileSystem fileSystem)
+        {
+            try
+            {
+                GitProcess.Result seedResult = seedTask.GetAwaiter().GetResult();
+                if (seedResult.ExitCodeIsFailure)
+                {
+                    EventMetadata metadata = new EventMetadata();
+                    metadata.Add("Errors", seedResult.Errors);
+                    metadata.Add(TracingConstants.MessageKey.WarningMessage, "Failed to write the projection seed index; the first mount will build the projection from the trees");
+                    tracer.RelatedEvent(EventLevel.Warning, "ProjectionSeed_WriteFailed", metadata);
+                    this.DeleteProjectionSeed(tracer, seedPath, fileSystem);
+                    return;
+                }
+
+                EventMetadata success = new EventMetadata();
+                success.Add("SeedPath", seedPath);
+                success.Add(TracingConstants.MessageKey.InfoMessage, "Wrote the projection seed index");
+                tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_Written", success);
+            }
+            catch (Exception e)
+            {
+                EventMetadata metadata = new EventMetadata();
+                metadata.Add("Exception", e.ToString());
+                metadata.Add(TracingConstants.MessageKey.WarningMessage, "Unexpected failure writing the projection seed index");
+                tracer.RelatedEvent(EventLevel.Warning, "ProjectionSeed_WriteException", metadata);
+                this.DeleteProjectionSeed(tracer, seedPath, fileSystem);
+            }
+        }
+
+        private void DeleteProjectionSeed(ITracer tracer, string seedPath, PhysicalFileSystem fileSystem)
+        {
+            try
+            {
+                if (fileSystem.FileExists(seedPath))
+                {
+                    fileSystem.DeleteFile(seedPath);
+                }
+            }
+            catch (Exception e)
+            {
+                EventMetadata metadata = new EventMetadata();
+                metadata.Add("Exception", e.ToString());
+                metadata.Add(TracingConstants.MessageKey.InfoMessage, "Failed to delete an incomplete projection seed index");
+                tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_DeleteFailed", metadata);
+            }
+        }
+
         private bool TryWriteInitialSparseCone(GVFSEnlistment enlistment, GitProcess git, PhysicalFileSystem fileSystem, out string errorMessage)
         {
             errorMessage = null;

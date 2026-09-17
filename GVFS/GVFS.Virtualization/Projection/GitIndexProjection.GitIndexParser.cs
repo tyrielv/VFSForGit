@@ -26,6 +26,18 @@ namespace GVFS.Virtualization.Projection
             private GitIndexProjection projection;
 
             /// <summary>
+            /// Set only while parsing a clone-time seed index, which carries no skip-worktree bits
+            /// (see <see cref="EntryIsProjected"/>).
+            /// </summary>
+            private bool assumeSkipWorktree;
+
+            /// <summary>
+            /// UTF-8 paths that are materialized in the working tree, used only in seed mode. These
+            /// stand in for the paths the virtual-filesystem hook would report as present.
+            /// </summary>
+            private List<byte[]> materializedPathBytes = new List<byte[]>();
+
+            /// <summary>
             /// A single GitIndexEntry instance used for parsing all entries in the index when building the projection
             /// </summary>
             private GitIndexEntry resuableProjectionBuildingIndexEntry = new GitIndexEntry(buildingNewProjection: true);
@@ -141,22 +153,61 @@ namespace GVFS.Virtualization.Projection
 
             public void RebuildProjection(ITracer tracer, Stream indexStream)
             {
+                this.RebuildProjection(tracer, indexStream, seedMode: false, materializedPaths: null);
+            }
+
+            /// <summary>
+            /// Rebuild the projection from an index stream.
+            /// </summary>
+            /// <param name="seedMode">
+            /// True when the stream is a clone-time seed index. A seed carries no skip-worktree
+            /// bits, so every entry is treated as projected except the supplied materialized
+            /// paths. See <see cref="EntryIsProjected"/> for why that matches what git computes.
+            /// </param>
+            /// <param name="materializedPaths">
+            /// Git-relative paths present in the working tree, used only in seed mode.
+            /// </param>
+            public void RebuildProjection(ITracer tracer, Stream indexStream, bool seedMode, IEnumerable<string> materializedPaths)
+            {
                 if (this.projection == null)
                 {
                     throw new InvalidOperationException($"{nameof(this.projection)} cannot be null when calling {nameof(this.RebuildProjection)}");
                 }
 
-                this.projection.ClearProjectionCaches();
-                FileSystemTaskResult result = this.ParseIndex(
-                    tracer,
-                    indexStream,
-                    this.resuableProjectionBuildingIndexEntry,
-                    this.AddIndexEntryToProjection);
-
-                if (result != FileSystemTaskResult.Success)
+                this.assumeSkipWorktree = seedMode;
+                this.materializedPathBytes.Clear();
+                if (seedMode && materializedPaths != null)
                 {
-                    // RebuildProjection should always result in FileSystemTaskResult.Success (or a thrown exception)
-                    throw new InvalidOperationException($"{nameof(this.RebuildProjection)}: {nameof(GitIndexParser.ParseIndex)} failed to {nameof(this.AddIndexEntryToProjection)}");
+                    foreach (string materializedPath in materializedPaths)
+                    {
+                        if (!string.IsNullOrEmpty(materializedPath))
+                        {
+                            this.materializedPathBytes.Add(
+                                Encoding.UTF8.GetBytes(materializedPath.Replace('\\', GVFSConstants.GitPathSeparator)));
+                        }
+                    }
+                }
+
+                try
+                {
+                    this.projection.ClearProjectionCaches();
+                    FileSystemTaskResult result = this.ParseIndex(
+                        tracer,
+                        indexStream,
+                        this.resuableProjectionBuildingIndexEntry,
+                        this.AddIndexEntryToProjection);
+
+                    if (result != FileSystemTaskResult.Success)
+                    {
+                        // RebuildProjection should always result in FileSystemTaskResult.Success (or a thrown exception)
+                        throw new InvalidOperationException($"{nameof(this.RebuildProjection)}: {nameof(GitIndexParser.ParseIndex)} failed to {nameof(this.AddIndexEntryToProjection)}");
+                    }
+                }
+                finally
+                {
+                    // Seed mode applies to a single parse only; a later rebuild reads a real index.
+                    this.assumeSkipWorktree = false;
+                    this.materializedPathBytes.Clear();
                 }
             }
 
@@ -245,7 +296,7 @@ namespace GVFS.Virtualization.Projection
             private FileSystemTaskResult AddIndexEntryToProjection(GitIndexEntry data)
             {
                 // Never want to project the common ancestor even if the skip worktree bit is on
-                if ((data.MergeState != MergeStage.CommonAncestor && data.SkipWorktree) || data.MergeState == MergeStage.Yours)
+                if ((data.MergeState != MergeStage.CommonAncestor && this.EntryIsProjected(data)) || data.MergeState == MergeStage.Yours)
                 {
                     if (data.IsSparseDirectory)
                     {
@@ -273,6 +324,68 @@ namespace GVFS.Virtualization.Projection
                 }
 
                 return FileSystemTaskResult.Success;
+            }
+
+            /// <summary>
+            /// Decide whether an index entry belongs in the projection.
+            /// </summary>
+            /// <remarks>
+            /// Normally this is the entry's skip-worktree bit: GVFS projects the entries git has
+            /// marked as absent from the working tree.
+            /// <para>
+            /// A clone-time seed index is different. It is produced by <c>git read-tree</c>, which
+            /// writes no skip-worktree bits at all, so reading the bit would project nothing. That
+            /// is not a defect in the seed: under a virtual filesystem the bit is not stored
+            /// state. <c>apply_virtualfilesystem()</c> recomputes it on every index read by
+            /// setting CE_SKIP_WORKTREE on every entry and then clearing it only for the paths the
+            /// virtual-filesystem hook reports as present. Seed mode performs exactly that
+            /// computation, using the modified-paths database as the set of present paths, so the
+            /// projection it produces matches the one built from an index git wrote.
+            /// </para>
+            /// </remarks>
+            private bool EntryIsProjected(GitIndexEntry data)
+            {
+                if (!this.assumeSkipWorktree)
+                {
+                    return data.SkipWorktree;
+                }
+
+                // A sparse-directory entry covers out-of-cone content, which is never
+                // materialized, so it is always projected.
+                if (data.IsSparseDirectory)
+                {
+                    return true;
+                }
+
+                // Compare against the materialized paths on the raw buffer. Decoding a string per
+                // entry would allocate once for every entry in a multi-million entry index; the
+                // materialized set is small (one path on a fresh clone), so a length check plus a
+                // byte compare is far cheaper and allocates nothing.
+                for (int i = 0; i < this.materializedPathBytes.Count; i++)
+                {
+                    byte[] candidate = this.materializedPathBytes[i];
+                    if (candidate.Length != data.PathLength)
+                    {
+                        continue;
+                    }
+
+                    bool same = true;
+                    for (int b = 0; b < candidate.Length; b++)
+                    {
+                        if (candidate[b] != data.PathBuffer[b])
+                        {
+                            same = false;
+                            break;
+                        }
+                    }
+
+                    if (same)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
             }
 
             /// <summary>
