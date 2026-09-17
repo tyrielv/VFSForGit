@@ -456,7 +456,36 @@ this is an error",
                 "path\\with\\backslashes\\file.txt",
             };
 
-            string gitPath = "C:\\Program Files\\Git\\cmd\\git.exe";
+            // Resolve git the way the product does, from the GitForWindows registry key, rather
+            // than assuming the default install location: the Git for Windows installer relocates
+            // an existing installation when pointed elsewhere, so the default path can be absent
+            // on a machine where git works fine.
+            string gitPath = null;
+            try
+            {
+                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\GitForWindows"))
+                {
+                    string installPath = key?.GetValue("InstallPath") as string;
+                    if (!string.IsNullOrWhiteSpace(installPath))
+                    {
+                        string candidate = System.IO.Path.Combine(installPath, @"cmd\git.exe");
+                        if (System.IO.File.Exists(candidate))
+                        {
+                            gitPath = candidate;
+                        }
+                    }
+                }
+            }
+            catch (System.Exception)
+            {
+                // Fall through to the default below.
+            }
+
+            if (gitPath == null)
+            {
+                gitPath = "C:\\Program Files\\Git\\cmd\\git.exe";
+            }
+
             if (!System.IO.File.Exists(gitPath))
             {
                 Assert.Ignore("Git not found at expected path — skipping integration test");

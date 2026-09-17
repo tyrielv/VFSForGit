@@ -93,7 +93,8 @@ namespace GVFS.UnitTests.Mock.Git
             Action<string> parseStdOutLine,
             int timeoutMs,
             string gitObjectsDirectory = null,
-            bool usePrecommandHook = true)
+            bool usePrecommandHook = true,
+            string indexFileOverride = null)
         {
             this.CommandsRun.Add(command);
             this.DotGitDirectoriesUsed.Add(dotGitDirectory);
