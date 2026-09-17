@@ -20,6 +20,14 @@ namespace GVFS.CommandLine
     {
         private const string CloneVerbName = "clone";
 
+        /// <summary>
+        /// How long clone will wait for the projection seed once the checkout has finished.
+        /// Generous, because abandoning the seed costs the first mount a full tree walk; bounded,
+        /// because the seed runs with no git-level timeout and clone must not hang on an
+        /// optimization. Measured seed cost on a 2.4M-entry repository is roughly 10 seconds.
+        /// </summary>
+        private static readonly TimeSpan ProjectionSeedWaitTimeout = TimeSpan.FromMinutes(5);
+
         public string RepositoryURL { get; set; }
 
         public override string EnlistmentRootPathParameter { get; set; }
@@ -934,13 +942,30 @@ namespace GVFS.CommandLine
         /// <remarks>
         /// The seed is an optimization, so every failure path here is non-fatal: a missing seed
         /// only means the first mount builds its projection by walking the collapsed trees, which
-        /// is what it did before. A partially written seed is deleted rather than left for the
-        /// mount to consume.
+        /// is what it did before.
+        /// <para>
+        /// The wait is bounded. Without a bound this optimization would add a new way for clone
+        /// itself to hang, because the seed runs with no git-level timeout. Abandoning a slow seed
+        /// is safe: git writes the index to a .lock file and renames it into place, so the mount
+        /// either finds a complete seed or finds none, never a truncated one. That matters because
+        /// the index parser trusts the entry count in the header, so a truncated index would be
+        /// parsed as entries rather than rejected.
+        /// </para>
         /// </remarks>
         private void WaitForProjectionSeed(ITracer tracer, Task<GitProcess.Result> seedTask, string seedPath, PhysicalFileSystem fileSystem)
         {
             try
             {
+                if (!seedTask.Wait(ProjectionSeedWaitTimeout))
+                {
+                    EventMetadata timedOut = new EventMetadata();
+                    timedOut.Add("TimeoutSeconds", ProjectionSeedWaitTimeout.TotalSeconds);
+                    timedOut.Add(TracingConstants.MessageKey.WarningMessage, "Timed out waiting for the projection seed index; the first mount will build the projection from the trees");
+                    tracer.RelatedEvent(EventLevel.Warning, "ProjectionSeed_WriteTimeout", timedOut);
+                    this.DeleteProjectionSeed(tracer, seedPath, fileSystem);
+                    return;
+                }
+
                 GitProcess.Result seedResult = seedTask.GetAwaiter().GetResult();
                 if (seedResult.ExitCodeIsFailure)
                 {
@@ -974,6 +999,14 @@ namespace GVFS.CommandLine
                 if (fileSystem.FileExists(seedPath))
                 {
                     fileSystem.DeleteFile(seedPath);
+                }
+
+                // An abandoned or failed seed leaves git's lock file behind. Nothing reads it, but
+                // a later seed write would fail while it exists.
+                string seedLockPath = seedPath + ".lock";
+                if (fileSystem.FileExists(seedLockPath))
+                {
+                    fileSystem.DeleteFile(seedLockPath);
                 }
             }
             catch (Exception e)
