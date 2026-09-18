@@ -359,21 +359,6 @@ namespace GVFS.Virtualization
             this.GitIndexProjection.WaitForProjectionUpdate();
         }
 
-        /// <summary>
-        /// Invalidate the projection (and optionally the modified-paths set) without
-        /// blocking for the rebuild. The background index-parsing thread rebuilds the
-        /// projection asynchronously, exactly as it does for every other index change.
-        /// Callers use this instead of <see cref="ForceIndexProjectionUpdate(bool, bool)"/>
-        /// when they must not pay the O(repo) reparse cost on their reply path -- the
-        /// automatic sparse-index cone handler, where the on-disk index is already
-        /// widened before the reply and the reparse only reconciles GVFS-internal state
-        /// (the projected set is the full HEAD tree regardless of the cone).
-        /// </summary>
-        public void RequestIndexProjectionUpdate(bool invalidateProjection, bool invalidateModifiedPaths)
-        {
-            this.InvalidateState(invalidateProjection, invalidateModifiedPaths);
-        }
-
         public NamedPipeMessages.ReleaseLock.Response TryReleaseExternalLock(int pid)
         {
             return this.GitIndexProjection.TryReleaseExternalLock(pid);

@@ -29,15 +29,15 @@ namespace GVFS.Mount
     /// <para>
     /// Concurrency: all cone operations run under a single process-internal lock, in the
     /// order coneLock -> atomic sparse-checkout file write -> git's own index.lock (held
-    /// only inside the child git) -> a projection-reparse trigger. The reparse itself is
-    /// NOT waited for on the reply path: <see cref="FileSystemCallbacks.RequestIndexProjectionUpdate"/>
-    /// invalidates the projection and the background index-parsing thread rebuilds it
-    /// asynchronously (the same machinery every other index change uses). Git only needs
+    /// only inside the child git). No projection reparse is triggered: the collapse leaves
+    /// core.hookspath intact, so git runs its own post-index-change hook and notifies the
+    /// mount with (updatedWorkingDirectory: false, updatedSkipWorktreeBits: true). A cone
+    /// change alters only the index's representation of a directory, and
+    /// SparseDirectoryExpander normalizes it back to the full HEAD tree, so the projected
+    /// set is unchanged -- measured byte-identical across a widen on os.2020. Git only needs
     /// the on-disk index widened -- which the collapse does before the reply -- to avoid a
-    /// full expansion; the projected set is the full HEAD tree regardless of the cone, so a
-    /// widen never changes what ProjFS projects and the reparse only reconciles GVFS-internal
-    /// state. Keeping the O(repo) reparse off the reply path is what keeps the hook's bounded
-    /// wait covering only the O(cone) index write. The handler never holds
+    /// full expansion, so the hook's bounded wait covers only the O(cone) index write. The
+    /// handler never holds
     /// projectionReadWriteLock itself and never opens the index for read, so it does not
     /// fight the index-parsing thread. The handler deliberately does NOT take the GVFS lock:
     /// the pre-command hook already holds it for the commands that widen (add, rm, restore,
@@ -267,18 +267,17 @@ namespace GVFS.Mount
             // next recompute.
             this.lastWrittenConeContent = newContent;
 
-            // The collapse rewrote the on-disk index with hooks disabled, so the mount got no
-            // PostIndexChanged notification. Trigger a projection reparse to reconcile the
-            // GVFS view with the new on-disk cone -- but do NOT wait for it. Git only needs
-            // the on-disk index widened (done above) to avoid a full expansion; the reparse
-            // is GVFS-internal and the projected set is the full HEAD tree regardless of the
-            // cone, so a widen never changes what ProjFS projects. Waiting for the reparse
-            // would put its O(repo) cost (seconds at os.2020 scale) on the hook's reply path
-            // and blow the wait budget; the background index-parsing thread rebuilds the
-            // projection asynchronously, exactly as it does for any other index change. The
-            // modified-paths set is unchanged.
-            this.fileSystemCallbacks.RequestIndexProjectionUpdate(invalidateProjection: true, invalidateModifiedPaths: false);
-
+            // No projection invalidation is needed here. ForceCollapseSparseIndex deliberately
+            // leaves core.hookspath intact (see GitProcess.ForceCollapseSparseIndex), so git runs
+            // its own post-index-change hook for this rewrite. update-index sets
+            // updated_skipworktree unconditionally, so the mount is already notified with
+            // (updatedWorkingDirectory: false, updatedSkipWorktreeBits: true) -- invalidate the
+            // modified-paths set, leave the projection alone. That is the correct verdict: a cone
+            // change alters only how the index represents a directory (one sparse-directory entry
+            // versus individual file entries), and SparseDirectoryExpander normalizes both back to
+            // the full HEAD tree, so the projected set is unchanged. Measured on os.2020: the
+            // projection is byte-identical across a widen (2,628,724 entries, same SHA256,
+            // including every blob SHA and folder inclusion flag). See decisions/0025.
             this.TraceApplied(caller, requestedPathCount, changed: true, hookWaitBudgetMs, blocksGitCommand, stopwatch, coneBuildMs, writeMs, collapseMs);
             return true;
         }
