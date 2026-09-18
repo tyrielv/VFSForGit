@@ -2038,10 +2038,10 @@ namespace GVFS.Virtualization.Projection
 
         private void CopyIndexFileAndBuildProjection()
         {
-            // A clone-time seed index lets the first projection be parsed from a full index
-            // instead of walking every collapsed tree. The seed is written during clone, while
-            // the trees are being read anyway; without it a sparse clone must read them again,
-            // cold, on first mount. See decisions/0022.
+            // A seed index lets the first projection be parsed from a full index instead of
+            // walking every collapsed tree. The mount writes it during startup, concurrently with
+            // work that does not need the projection; without it a sparse index has to be expanded
+            // by reading those trees cold. See decisions/0022.
             string seedPath = Path.Combine(this.context.Enlistment.DotGVFSRoot, ProjectionIndexSeedName);
             if (this.context.FileSystem.FileExists(seedPath))
             {
@@ -2056,7 +2056,7 @@ namespace GVFS.Virtualization.Projection
         }
 
         /// <summary>
-        /// Build the first projection from a clone-time seed index.
+        /// Build the first projection from a seed index.
         /// </summary>
         /// <remarks>
         /// The seed is produced by <c>git read-tree</c>, so it holds every entry but no
@@ -2090,7 +2090,7 @@ namespace GVFS.Virtualization.Projection
                         }
 
                         EventMetadata metadata = CreateEventMetadata();
-                        metadata.Add(TracingConstants.MessageKey.InfoMessage, "Built the first projection from the clone-time seed index");
+                        metadata.Add(TracingConstants.MessageKey.InfoMessage, "Built the projection from the seed index");
                         tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_Used", metadata);
                         return true;
                     }

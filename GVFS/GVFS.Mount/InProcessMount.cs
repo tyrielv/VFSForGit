@@ -10,6 +10,7 @@ using GVFS.Common.Tracing;
 using GVFS.PlatformLoader;
 using GVFS.Virtualization;
 using GVFS.Virtualization.FileSystem;
+using GVFS.Virtualization.Projection;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -40,6 +41,15 @@ namespace GVFS.Mount
         // Set to 20x the threshold so that enough trees can accumulate for the heuristic to
         // reliably trigger a commit pack download.
         private const int TrackedTreeCapacity = MissingTreeThresholdForDownloadingCommitPack * 20;
+
+        /// <summary>
+        /// How long the mount waits for the projection seed once everything that could overlap it
+        /// has finished. Generous, because abandoning the seed costs a full tree walk; bounded,
+        /// because the seed runs with no git-level timeout and mount must not hang on an
+        /// optimization. Measured seed cost on a repository of 2.4 million entries is about ten
+        /// seconds.
+        /// </summary>
+        private static readonly TimeSpan ProjectionSeedWaitTimeout = TimeSpan.FromMinutes(5);
 
         private readonly bool showDebugWindow;
 
@@ -256,6 +266,11 @@ namespace GVFS.Mount
 
             this.enlistment.InitializeCachePaths(localCacheRoot, gitObjectsRoot, blobSizesRoot);
 
+            // Start the projection seed now, so it runs while auth, validation, and the hooks
+            // update are in flight. This is the longest stretch of mount startup that does not
+            // need the projection, and it is the reason the seed lives here rather than in clone.
+            Task<GitProcess.Result> seedTask = this.TryStartProjectionSeed(mountPhaseTimer, out string seedPath);
+
             // Read the display-layer flag once before the pipe opens so the very first
             // GetStatus request is served consistently. Only gates the progress strings;
             // the pipe still starts early regardless (reliability infrastructure).
@@ -432,6 +447,10 @@ namespace GVFS.Mount
 
                 GVFSPlatform.Instance.ConfigureVisualStudio(this.enlistment.GitBinPath, this.tracer);
 
+                // Collect the seed immediately before the projection build, which is the first
+                // thing that can use it. Everything above ran concurrently with it.
+                this.WaitForProjectionSeed(seedTask, seedPath, mountPhaseTimer);
+
                 this.mountProgressMessage = "Starting virtualization";
 
                 this.tracer.RelatedEvent(
@@ -503,6 +522,160 @@ namespace GVFS.Mount
                 this.enlistment.WorkingDirectoryBackingRoot,
                 GVFSConstants.GitConfig.BackgroundCacheAuth,
                 GVFSConstants.GitConfig.BackgroundCacheAuthDefault);
+        }
+
+        /// <summary>
+        /// Start writing a projection seed index if this mount is going to build its projection
+        /// from a sparse index.
+        /// </summary>
+        /// <remarks>
+        /// A sparse index does not record the contents of the collapsed directories, so building a
+        /// projection from one means reading every collapsed tree. On a repository of a few million
+        /// entries that is hundreds of thousands of objects read cold. A full index written by
+        /// <c>read-tree</c> holds the same information in a form the projection parser already
+        /// reads quickly, so writing one here and parsing it there is faster than walking the
+        /// trees -- as long as the write overlaps work the mount has to do anyway.
+        /// <para>
+        /// It does overlap: nothing between here and the projection build needs the projection, and
+        /// that stretch covers authentication, local validation, and the hooks update. The window
+        /// grows when authentication is slow, which is exactly when the machine can least afford
+        /// an extra serial ten seconds.
+        /// </para>
+        /// <para>
+        /// Returns null when the seed cannot help, which is the common case: a repository that is
+        /// not using a sparse index, or a mount whose projection is still valid and will not be
+        /// rebuilt. Returning null costs nothing, so the checks are ordered cheapest first.
+        /// </para>
+        /// </remarks>
+        private Task<GitProcess.Result> TryStartProjectionSeed(Stopwatch mountPhaseTimer, out string seedPath)
+        {
+            seedPath = null;
+
+            try
+            {
+                if (!LibGit2Repo.GetConfigBoolOrDefault(
+                        this.tracer,
+                        this.enlistment.WorkingDirectoryBackingRoot,
+                        GVFSConstants.GitConfig.AutoSparseIndex,
+                        GVFSConstants.GitConfig.AutoSparseIndexDefault))
+                {
+                    return null;
+                }
+
+                // Mirror the condition GitIndexProjection.Initialize uses to decide whether to
+                // rebuild. When the persisted projection is still usable the seed is dead weight.
+                string projectionPath = Path.Combine(this.enlistment.DotGVFSRoot, GitIndexProjection.ProjectionIndexBackupName);
+                bool willBuildProjection = !File.Exists(projectionPath) || RepoMetadata.Instance.GetProjectionInvalid();
+                if (!willBuildProjection)
+                {
+                    return null;
+                }
+
+                string path = Path.Combine(this.enlistment.DotGVFSRoot, GVFSConstants.DotGVFS.ProjectionIndexSeedName);
+
+                // A seed left behind by an earlier attempt is not trustworthy: it describes
+                // whatever HEAD was current then. Remove it so this mount either consumes a seed
+                // it just wrote for the current HEAD, or none at all.
+                this.DeleteProjectionSeed(path);
+
+                seedPath = path;
+
+                this.tracer.RelatedEvent(
+                    EventLevel.Informational,
+                    "ProjectionSeed_Started",
+                    new EventMetadata
+                    {
+                        { "SeedPath", seedPath },
+                        { "ElapsedMs", mountPhaseTimer.ElapsedMilliseconds },
+                    });
+
+                // Its own GitProcess: GitProcess keeps the running child in an instance field, so
+                // concurrent invocations on one instance overwrite each other and one ends up
+                // reading the other's streams.
+                GitProcess seedGit = new GitProcess(this.enlistment);
+                string capturedPath = seedPath;
+                return Task.Run(() => seedGit.WriteProjectionSeedIndex(capturedPath));
+            }
+            catch (Exception e)
+            {
+                this.tracer.RelatedWarning("Could not start the projection seed; the projection will be built from the trees: " + e.Message);
+                seedPath = null;
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Wait for a projection seed started by <see cref="TryStartProjectionSeed"/>.
+        /// </summary>
+        /// <remarks>
+        /// Every failure here is non-fatal. Without a seed the projection is built by walking the
+        /// trees, which is what this mount would have done anyway, so the seed is never allowed to
+        /// turn a slow mount into a failed one.
+        /// <para>
+        /// The wait is bounded so that a seed which never finishes cannot hang the mount.
+        /// Abandoning it is safe: git writes the index to a lock file and renames it into place, so
+        /// the projection finds either a complete seed or none, never a truncated one. That
+        /// distinction matters because the index parser trusts the entry count in the header and
+        /// would read a short file as entries rather than rejecting it.
+        /// </para>
+        /// </remarks>
+        private void WaitForProjectionSeed(Task<GitProcess.Result> seedTask, string seedPath, Stopwatch mountPhaseTimer)
+        {
+            if (seedTask == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (!seedTask.Wait(ProjectionSeedWaitTimeout))
+                {
+                    this.tracer.RelatedWarning(
+                        "Timed out after " + ProjectionSeedWaitTimeout.TotalSeconds +
+                        "s waiting for the projection seed; building the projection from the trees instead");
+                    this.DeleteProjectionSeed(seedPath);
+                    return;
+                }
+
+                GitProcess.Result seedResult = seedTask.GetAwaiter().GetResult();
+                if (seedResult.ExitCodeIsFailure)
+                {
+                    this.tracer.RelatedWarning("Failed to write the projection seed; building the projection from the trees instead: " + seedResult.Errors);
+                    this.DeleteProjectionSeed(seedPath);
+                    return;
+                }
+
+                this.tracer.RelatedEvent(
+                    EventLevel.Informational,
+                    "ProjectionSeed_Written",
+                    new EventMetadata
+                    {
+                        { "SeedPath", seedPath },
+                        { "ElapsedMs", mountPhaseTimer.ElapsedMilliseconds },
+                    },
+                    Keywords.Telemetry);
+            }
+            catch (Exception e)
+            {
+                this.tracer.RelatedWarning("Unexpected failure writing the projection seed; building the projection from the trees instead: " + e.Message);
+                this.DeleteProjectionSeed(seedPath);
+            }
+        }
+
+        private void DeleteProjectionSeed(string seedPath)
+        {
+            try
+            {
+                File.Delete(seedPath);
+
+                // An abandoned or failed read-tree leaves git's lock file behind. Nothing reads it,
+                // but a later seed write fails while it exists.
+                File.Delete(seedPath + ".lock");
+            }
+            catch (Exception e)
+            {
+                this.tracer.RelatedWarning("Failed to delete the projection seed at " + seedPath + ": " + e.Message);
+            }
         }
 
         private void ValidateMountPoints()

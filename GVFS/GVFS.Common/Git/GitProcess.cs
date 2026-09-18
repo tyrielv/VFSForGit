@@ -625,31 +625,40 @@ namespace GVFS.Common.Git
         /// touching the working tree or the repository's own index.
         /// </summary>
         /// <remarks>
-        /// Used at clone time as a projection seed. A sparse clone never reads the collapsed
-        /// trees, so the first mount would otherwise have to read them cold; writing this seed
-        /// while the clone is already running lets the first projection be parsed instead.
+        /// Used as a projection seed. A sparse index never records the collapsed trees, so a cold
+        /// projection build would otherwise have to read them all; writing this seed while the
+        /// mount is doing something else lets the first projection be parsed instead.
         /// <para>
         /// <c>GIT_INDEX_FILE</c> points git at the seed for both reading and writing, so it never
-        /// locks the repository's own index and can run alongside the clone's checkout.
+        /// locks the repository's own index and can run alongside other git commands.
         /// <c>--index-output</c> is not sufficient: it redirects only the write, and git still
-        /// takes <c>.git/index.lock</c>, which fails the concurrent checkout with
+        /// takes <c>.git/index.lock</c>, which fails a concurrent checkout with
         /// "Unable to create index.lock: File exists". <c>read-tree</c> writes no working-tree
         /// files, so there is no working-tree contention either.
-        /// <para>
-        /// The seed carries no skip-worktree bits -- under a virtual filesystem those are
-        /// recomputed on every index read rather than stored, and the parser reconstructs them
-        /// when it consumes the seed. See decisions/0022.
         /// </para>
         /// <para>
-        /// The read-object hook is disabled to match <see cref="ForceCheckout"/>: during clone it
-        /// is not yet available. A missing tree therefore fails this command, which is safe --
-        /// the seed is an optimization and the caller ignores failure.
+        /// Both virtualization hooks are disabled. The read-object hook is disabled to match
+        /// <see cref="ForceCheckout"/>: a missing tree then fails this command rather than
+        /// hanging, which is safe because the seed is an optimization and every caller ignores
+        /// failure. The virtual-filesystem hook is disabled because it queries the mount over a
+        /// named pipe, and a mount that is still starting refuses that request -- so a seed run
+        /// during mount startup would fail through no fault of its own.
+        /// </para>
+        /// <para>
+        /// Disabling the virtual-filesystem hook does not change the output: <c>read-tree</c>
+        /// rebuilds every entry from the tree, and <c>apply_virtualfilesystem()</c> runs on index
+        /// read rather than write, so the hook's answer cannot reach the file. Verified by
+        /// comparing a seed written with the hook against one written without it -- byte
+        /// identical, including the absence of skip-worktree bits. Those bits are recomputed on
+        /// every index read rather than stored, and the parser reconstructs them when it consumes
+        /// the seed. See decisions/0022.
         /// </para>
         /// </remarks>
         public Result WriteProjectionSeedIndex(string seedPath)
         {
             return this.InvokeGitImpl(
-                "-c " + GitConfigSetting.IndexSparseName + "=false read-tree HEAD",
+                "-c " + GitConfigSetting.IndexSparseName + "=false" +
+                    " -c " + GitConfigSetting.CoreVirtualFileSystemName + "= read-tree HEAD",
                 workingDirectory: this.workingDirectoryRoot,
                 dotGitDirectory: null,
                 useReadObjectHook: false,
