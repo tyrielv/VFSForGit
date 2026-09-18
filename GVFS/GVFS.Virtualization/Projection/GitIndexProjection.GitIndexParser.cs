@@ -38,6 +38,13 @@ namespace GVFS.Virtualization.Projection
             private List<byte[]> materializedPathBytes = new List<byte[]>();
 
             /// <summary>
+            /// Entries seen and entries projected during the current <see cref="RebuildProjection"/>.
+            /// Used only to detect a degenerate result; see the check at the end of that method.
+            /// </summary>
+            private long entriesSeenInBuild;
+            private long entriesProjectedInBuild;
+
+            /// <summary>
             /// A single GitIndexEntry instance used for parsing all entries in the index when building the projection
             /// </summary>
             private GitIndexEntry resuableProjectionBuildingIndexEntry = new GitIndexEntry(buildingNewProjection: true);
@@ -191,6 +198,8 @@ namespace GVFS.Virtualization.Projection
                 try
                 {
                     this.projection.ClearProjectionCaches();
+                    this.entriesSeenInBuild = 0;
+                    this.entriesProjectedInBuild = 0;
                     FileSystemTaskResult result = this.ParseIndex(
                         tracer,
                         indexStream,
@@ -201,6 +210,20 @@ namespace GVFS.Virtualization.Projection
                     {
                         // RebuildProjection should always result in FileSystemTaskResult.Success (or a thrown exception)
                         throw new InvalidOperationException($"{nameof(this.RebuildProjection)}: {nameof(GitIndexParser.ParseIndex)} failed to {nameof(this.AddIndexEntryToProjection)}");
+                    }
+
+                    // An index with entries that projects none of them is always wrong, and it is
+                    // wrong in the worst way: the mount reports ready and serves an empty working
+                    // tree. It happens when the stored skip-worktree bits do not mean what this
+                    // parser assumes. Under a virtual filesystem those bits are not stored state --
+                    // git recomputes them on every index read -- so an index that is perfectly
+                    // valid to git can carry none at all. Fail here instead of projecting nothing.
+                    if (this.entriesSeenInBuild > 0 && this.entriesProjectedInBuild == 0)
+                    {
+                        throw new InvalidDataException(
+                            $"Refusing to build an empty projection from an index with {this.entriesSeenInBuild} entries. " +
+                            "No entry was marked skip-worktree, which usually means the index was written by a tool that " +
+                            "does not record those bits. To recover, remount; if that fails, run 'gvfs repair'.");
                     }
                 }
                 finally
@@ -295,9 +318,13 @@ namespace GVFS.Virtualization.Projection
 
             private FileSystemTaskResult AddIndexEntryToProjection(GitIndexEntry data)
             {
+                this.entriesSeenInBuild++;
+
                 // Never want to project the common ancestor even if the skip worktree bit is on
                 if ((data.MergeState != MergeStage.CommonAncestor && this.EntryIsProjected(data)) || data.MergeState == MergeStage.Yours)
                 {
+                    this.entriesProjectedInBuild++;
+
                     if (data.IsSparseDirectory)
                     {
                         // A sparse-directory entry (git index.sparse) collapses a folder to its
