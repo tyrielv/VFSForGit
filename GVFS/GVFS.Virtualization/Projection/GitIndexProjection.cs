@@ -2068,6 +2068,12 @@ namespace GVFS.Virtualization.Projection
         /// a stale or corrupt seed can never affect a later mount, and any failure falls back to
         /// the normal path rather than leaving the mount without a projection.
         /// </para>
+        /// <para>
+        /// The seed is never persisted as the projection backup. The backup is re-parsed on a
+        /// later mount in normal mode, where an entry is projected only if it carries the
+        /// skip-worktree bit; a seed carries none, so persisting it would make the next mount
+        /// project nothing and serve an empty working tree while reporting ready.
+        /// </para>
         /// </remarks>
         private bool TryBuildProjectionFromSeed(string seedPath)
         {
@@ -2077,10 +2083,8 @@ namespace GVFS.Virtualization.Projection
                 {
                     try
                     {
-                        this.context.FileSystem.CopyFile(seedPath, this.projectionIndexBackupPath, overwrite: true);
-
                         this.SetProjectionInvalid(false);
-                        using (FileStream indexStream = new FileStream(this.projectionIndexBackupPath, FileMode.Open, FileAccess.Read, FileShare.Read, IndexFileStreamBufferSize))
+                        using (FileStream indexStream = new FileStream(seedPath, FileMode.Open, FileAccess.Read, FileShare.Read, IndexFileStreamBufferSize))
                         {
                             this.indexParser.RebuildProjection(
                                 tracer,
@@ -2088,6 +2092,13 @@ namespace GVFS.Virtualization.Projection
                                 seedMode: true,
                                 materializedPaths: this.modifiedPaths.GetAllModifiedPaths());
                         }
+
+                        // Persist the repository's own index as the backup, NOT the seed. The
+                        // backup is re-parsed on a later mount in normal mode, where an entry is
+                        // projected only if it carries the skip-worktree bit. A seed comes from
+                        // read-tree and carries none, so persisting it would project nothing and
+                        // the next mount would serve an empty working tree while reporting ready.
+                        this.context.FileSystem.CopyFile(this.indexPath, this.projectionIndexBackupPath, overwrite: true);
 
                         EventMetadata metadata = CreateEventMetadata();
                         metadata.Add(TracingConstants.MessageKey.InfoMessage, "Built the projection from the seed index");
