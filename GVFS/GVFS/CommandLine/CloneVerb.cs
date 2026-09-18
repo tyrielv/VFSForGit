@@ -20,14 +20,6 @@ namespace GVFS.CommandLine
     {
         private const string CloneVerbName = "clone";
 
-        /// <summary>
-        /// How long clone will wait for the projection seed once the checkout has finished.
-        /// Generous, because abandoning the seed costs the first mount a full tree walk; bounded,
-        /// because the seed runs with no git-level timeout and clone must not hang on an
-        /// optimization. Measured seed cost on a 2.4M-entry repository is roughly 10 seconds.
-        /// </summary>
-        private static readonly TimeSpan ProjectionSeedWaitTimeout = TimeSpan.FromMinutes(5);
-
         public string RepositoryURL { get; set; }
 
         public override string EnlistmentRootPathParameter { get; set; }
@@ -773,9 +765,6 @@ namespace GVFS.CommandLine
                 return new Result(installHooksError);
             }
 
-            Task<GitProcess.Result> seedTask = null;
-            string seedPath = null;
-
             if (this.SparseIndex)
             {
                 // Establish the minimal cone and cone-mode sparse checkout BEFORE the checkout, so a
@@ -792,21 +781,14 @@ namespace GVFS.CommandLine
                     return new Result(errorMessage);
                 }
 
-                // Write the projection seed alongside the checkout. The checkout below is cheap
-                // precisely because a sparse checkout never descends into the collapsed trees --
-                // which leaves them cold for the first mount's projection build. Reading them here
-                // overlaps that cost with the clone instead of paying it later. read-tree writes no
-                // working-tree files and targets its own index file, so it does not contend with
-                // the checkout. Failure is ignored: the mount falls back to building the projection
-                // from the trees. See decisions/0022.
-                seedPath = Path.Combine(enlistment.DotGVFSRoot, GVFSConstants.DotGVFS.ProjectionIndexSeedName);
-
-                // A separate GitProcess is required: GitProcess keeps the running child in an
-                // instance field (executingProcess), so two concurrent invocations on one instance
-                // overwrite each other and the loser reads the winner's streams. Sharing the
-                // instance here fails the clone with "StandardIn has not been redirected".
-                GitProcess seedGit = new GitProcess(enlistment);
-                seedTask = Task.Run(() => seedGit.WriteProjectionSeedIndex(seedPath));
+                // The first mount pays for this sparseness: it has to read the collapsed trees the
+                // checkout skipped. The mount writes its own projection seed to avoid that, rather
+                // than clone writing one here. Clone looks like the better place at first glance --
+                // the checkout is right there to overlap with -- but the sparse checkout only
+                // writes .gitattributes and finishes in about 5 seconds, while the seed takes
+                // about 10, so clone ends up waiting roughly 5.7 seconds for it. Mount has a longer
+                // window before it needs the projection, and that window grows on a slower machine
+                // rather than shrinking. See decisions/0022.
             }
 
             GitProcess.Result forceCheckoutResult = git.ForceCheckout(branch);
@@ -852,15 +834,6 @@ namespace GVFS.CommandLine
                     tracer.RelatedError(error);
                     return new Result(error);
                 }
-            }
-
-            if (seedTask != null)
-            {
-                // The seed must be on disk before clone returns, because the first mount consumes
-                // it. Waiting here still overlaps its cost with the checkout above. Any failure is
-                // logged and ignored: without a seed the mount builds the projection from the
-                // trees, which is the behavior before this optimization.
-                this.WaitForProjectionSeed(tracer, seedTask, seedPath, fileSystem);
             }
 
             if (this.SparseIndex)
@@ -936,87 +909,6 @@ namespace GVFS.CommandLine
         /// is a hard prerequisite. See decisions/0015 "Alternative: cone before checkout" for the
         /// full matrix.
         /// </remarks>
-        /// <summary>
-        /// Wait for the clone-time projection seed and record the outcome.
-        /// </summary>
-        /// <remarks>
-        /// The seed is an optimization, so every failure path here is non-fatal: a missing seed
-        /// only means the first mount builds its projection by walking the collapsed trees, which
-        /// is what it did before.
-        /// <para>
-        /// The wait is bounded. Without a bound this optimization would add a new way for clone
-        /// itself to hang, because the seed runs with no git-level timeout. Abandoning a slow seed
-        /// is safe: git writes the index to a .lock file and renames it into place, so the mount
-        /// either finds a complete seed or finds none, never a truncated one. That matters because
-        /// the index parser trusts the entry count in the header, so a truncated index would be
-        /// parsed as entries rather than rejected.
-        /// </para>
-        /// </remarks>
-        private void WaitForProjectionSeed(ITracer tracer, Task<GitProcess.Result> seedTask, string seedPath, PhysicalFileSystem fileSystem)
-        {
-            try
-            {
-                if (!seedTask.Wait(ProjectionSeedWaitTimeout))
-                {
-                    EventMetadata timedOut = new EventMetadata();
-                    timedOut.Add("TimeoutSeconds", ProjectionSeedWaitTimeout.TotalSeconds);
-                    timedOut.Add(TracingConstants.MessageKey.WarningMessage, "Timed out waiting for the projection seed index; the first mount will build the projection from the trees");
-                    tracer.RelatedEvent(EventLevel.Warning, "ProjectionSeed_WriteTimeout", timedOut);
-                    this.DeleteProjectionSeed(tracer, seedPath, fileSystem);
-                    return;
-                }
-
-                GitProcess.Result seedResult = seedTask.GetAwaiter().GetResult();
-                if (seedResult.ExitCodeIsFailure)
-                {
-                    EventMetadata metadata = new EventMetadata();
-                    metadata.Add("Errors", seedResult.Errors);
-                    metadata.Add(TracingConstants.MessageKey.WarningMessage, "Failed to write the projection seed index; the first mount will build the projection from the trees");
-                    tracer.RelatedEvent(EventLevel.Warning, "ProjectionSeed_WriteFailed", metadata);
-                    this.DeleteProjectionSeed(tracer, seedPath, fileSystem);
-                    return;
-                }
-
-                EventMetadata success = new EventMetadata();
-                success.Add("SeedPath", seedPath);
-                success.Add(TracingConstants.MessageKey.InfoMessage, "Wrote the projection seed index");
-                tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_Written", success);
-            }
-            catch (Exception e)
-            {
-                EventMetadata metadata = new EventMetadata();
-                metadata.Add("Exception", e.ToString());
-                metadata.Add(TracingConstants.MessageKey.WarningMessage, "Unexpected failure writing the projection seed index");
-                tracer.RelatedEvent(EventLevel.Warning, "ProjectionSeed_WriteException", metadata);
-                this.DeleteProjectionSeed(tracer, seedPath, fileSystem);
-            }
-        }
-
-        private void DeleteProjectionSeed(ITracer tracer, string seedPath, PhysicalFileSystem fileSystem)
-        {
-            try
-            {
-                if (fileSystem.FileExists(seedPath))
-                {
-                    fileSystem.DeleteFile(seedPath);
-                }
-
-                // An abandoned or failed seed leaves git's lock file behind. Nothing reads it, but
-                // a later seed write would fail while it exists.
-                string seedLockPath = seedPath + ".lock";
-                if (fileSystem.FileExists(seedLockPath))
-                {
-                    fileSystem.DeleteFile(seedLockPath);
-                }
-            }
-            catch (Exception e)
-            {
-                EventMetadata metadata = new EventMetadata();
-                metadata.Add("Exception", e.ToString());
-                metadata.Add(TracingConstants.MessageKey.InfoMessage, "Failed to delete an incomplete projection seed index");
-                tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_DeleteFailed", metadata);
-            }
-        }
 
         private bool TryWriteInitialSparseCone(GVFSEnlistment enlistment, GitProcess git, PhysicalFileSystem fileSystem, out string errorMessage)
         {
