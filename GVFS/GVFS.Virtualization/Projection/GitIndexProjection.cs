@@ -23,6 +23,13 @@ namespace GVFS.Virtualization.Projection
     {
         public const string ProjectionIndexBackupName = "GVFS_projection";
 
+        /// <summary>
+        /// A full index written during clone so the first projection can be parsed instead of
+        /// walking every collapsed tree. Consumed and deleted on the first mount. See
+        /// decisions/0022.
+        /// </summary>
+        public const string ProjectionIndexSeedName = GVFSConstants.DotGVFS.ProjectionIndexSeedName;
+
         public static readonly ushort FileMode755 = Convert.ToUInt16("755", 8);
         public static readonly ushort FileMode664 = Convert.ToUInt16("664", 8);
         public static readonly ushort FileMode644 = Convert.ToUInt16("644", 8);
@@ -61,6 +68,12 @@ namespace GVFS.Virtualization.Projection
         private SparseFolderData rootSparseFolder;
         private GVFSGitObjects gitObjects;
         private BackgroundFileSystemTaskRunner backgroundFileSystemTaskRunner;
+
+        // When true, a sparse-directory entry (git index.sparse) is expanded into the projection
+        // by reading (and if needed downloading) its collapsed tree. When false (default), such an
+        // entry fails the projection build. Gated by gvfs.auto-sparse-index, read once at construction.
+        private bool sparseIndexExpansionEnabled;
+        private SparseDirectoryExpander sparseDirectoryExpander;
         private ReaderWriterLockSlim projectionReadWriteLock;
         private ManualResetEventSlim projectionParseComplete;
 
@@ -116,6 +129,18 @@ namespace GVFS.Virtualization.Projection
             this.rootSparseFolder = new SparseFolderData();
             this.ClearProjectionCaches();
 
+            this.sparseIndexExpansionEnabled = this.context.Repository != null
+                && this.context.Repository.GetConfigBoolOrDefault(GVFSConstants.GitConfig.AutoSparseIndex, GVFSConstants.GitConfig.AutoSparseIndexDefault);
+            if (this.sparseIndexExpansionEnabled)
+            {
+                this.sparseDirectoryExpander = new SparseDirectoryExpander(
+                    this.context.Tracer,
+                    new LibGit2ProjectionTreeReader(this.context.Repository, this.gitObjects),
+                    GVFSPlatform.Instance.FileSystem.SupportsFileMode,
+                    this.rootSparseFolder,
+                    this.nonDefaultFileTypesAndModes);
+            }
+
             LocalGVFSConfig config = new LocalGVFSConfig();
             if (config.TryGetConfig(GVFSConstants.LocalGVFSConfig.USNJournalUpdates, out string value, out string error))
             {
@@ -135,6 +160,10 @@ namespace GVFS.Virtualization.Projection
             Regular,
             SymLink,
             GitLink,
+
+            // Sparse-directory entry in a sparse index (git index.sparse). Mode 040000, a
+            // tree OID, and the skip-worktree bit. It stands in for a collapsed subtree.
+            Directory,
         }
 
         public enum PathSparseState
@@ -199,7 +228,16 @@ namespace GVFS.Virtualization.Projection
             {
                 this.projectionInvalid = this.repoMetadata.GetProjectionInvalid();
 
-                if (!this.context.FileSystem.FileExists(this.projectionIndexBackupPath) || this.projectionInvalid)
+                // A seed, when present, is always the better source: it is a full index written
+                // for the current HEAD, so parsing it avoids re-expanding the collapsed trees that
+                // the persisted backup still holds. Prefer it even when the backup is usable,
+                // because for a sparse enlistment that backup is sparse and would cost a full
+                // tree walk to parse. CopyIndexFileAndBuildProjection consumes the seed if it is
+                // there and falls back to the backup if it is not.
+                string seedPath = Path.Combine(this.context.Enlistment.DotGVFSRoot, ProjectionIndexSeedName);
+                bool seedAvailable = this.context.FileSystem.FileExists(seedPath);
+
+                if (seedAvailable || !this.context.FileSystem.FileExists(this.projectionIndexBackupPath) || this.projectionInvalid)
                 {
                     this.CopyIndexFileAndBuildProjection();
                 }
@@ -976,6 +1014,92 @@ namespace GVFS.Virtualization.Projection
             parentFolder.AddChildFile(indexEntry.BuildingProjection_PathParts[indexEntry.BuildingProjection_NumParts - 1], indexEntry.Sha);
 
             return parentFolder;
+        }
+
+        /// <summary>
+        /// True when a sparse-directory entry (git index.sparse) should be expanded into the
+        /// projection instead of failing the build. Gated by gvfs.auto-sparse-index.
+        /// </summary>
+        internal bool SparseIndexExpansionEnabled
+        {
+            get { return this.sparseIndexExpansionEnabled; }
+        }
+
+        /// <summary>
+        /// Create the collapsed folder for a sparse-directory entry (and any missing ancestor
+        /// folders), returning the collapsed folder's FolderData. Unlike <see cref="AddFileToTree"/>,
+        /// this creates the final path part as a folder, because a sparse-directory entry names a
+        /// folder rather than a file.
+        /// </summary>
+        private FolderData AddSparseDirectoryToTree(GitIndexEntry indexEntry)
+        {
+            FolderData parentFolder = this.rootFolderData;
+            for (int pathIndex = 0; pathIndex < indexEntry.BuildingProjection_NumParts; ++pathIndex)
+            {
+                parentFolder = parentFolder.ChildEntries.GetOrAddFolder(
+                    indexEntry.BuildingProjection_PathParts,
+                    pathIndex,
+                    parentFolder.IsIncluded,
+                    this.rootSparseFolder);
+            }
+
+            return parentFolder;
+        }
+
+        /// <summary>
+        /// Expand a sparse-directory entry's collapsed subtree into the projection. Only called
+        /// when <see cref="sparseIndexExpansionEnabled"/> is true.
+        /// </summary>
+        private void ExpandSparseDirectory(GitIndexEntry indexEntry)
+        {
+            // Parse the collapsed folder path without its trailing '/'. ClearLastParent forces a
+            // full parse and leaves the next entry to do its own full parse (the previous-separator
+            // state is reset), so index-v4 prefix decompression stays correct.
+            indexEntry.ClearLastParent();
+            indexEntry.BuildingProjection_ParsePath(indexEntry.ProjectionPathLength);
+
+            FolderData collapsedFolder = this.AddSparseDirectoryToTree(indexEntry);
+
+            string collapsedGitPath = GVFSPlatform.Instance.FileSystem.SupportsFileMode
+                ? indexEntry.BuildingProjection_GetGitRelativePath()
+                : null;
+
+            string treeSha = SHA1Util.HexStringFromBytes(indexEntry.Sha);
+            FrameInclusion rootInclusion = this.ComputeCollapsedFolderInclusion(indexEntry);
+
+            this.sparseDirectoryExpander.Expand(collapsedFolder, collapsedGitPath, treeSha, rootInclusion);
+
+            indexEntry.ClearLastParent();
+        }
+
+        /// <summary>
+        /// Compute the gvfs sparse-cone inclusion frame for a collapsed folder by walking the
+        /// sparse root over its path parts, mirroring <see cref="SortedFolderEntries.GetOrAddFolder"/>.
+        /// </summary>
+        private FrameInclusion ComputeCollapsedFolderInclusion(GitIndexEntry indexEntry)
+        {
+            if (this.rootSparseFolder.Children.Count == 0)
+            {
+                return FrameInclusion.AllIncluded;
+            }
+
+            SparseFolderData node = this.rootSparseFolder;
+            int numParts = indexEntry.BuildingProjection_NumParts;
+            for (int i = 0; i < numParts; i++)
+            {
+                if (node.IsRecursive)
+                {
+                    return FrameInclusion.AllIncluded;
+                }
+
+                string partName = indexEntry.BuildingProjection_PathParts[i].GetString();
+                if (!node.Children.TryGetValue(partName, out node))
+                {
+                    return FrameInclusion.Excluded;
+                }
+            }
+
+            return new FrameInclusion(included: true, recursive: node.IsRecursive, node: node);
         }
 
         private FolderEntryData GetProjectedFolderEntryData(
@@ -1923,8 +2047,97 @@ namespace GVFS.Virtualization.Projection
 
         private void CopyIndexFileAndBuildProjection()
         {
+            // A seed index lets the first projection be parsed from a full index instead of
+            // walking every collapsed tree. The mount writes it during startup, concurrently with
+            // work that does not need the projection; without it a sparse index has to be expanded
+            // by reading those trees cold. See decisions/0022.
+            string seedPath = Path.Combine(this.context.Enlistment.DotGVFSRoot, ProjectionIndexSeedName);
+            if (this.context.FileSystem.FileExists(seedPath))
+            {
+                if (this.TryBuildProjectionFromSeed(seedPath))
+                {
+                    return;
+                }
+            }
+
             this.context.FileSystem.CopyFile(this.indexPath, this.projectionIndexBackupPath, overwrite: true);
             this.BuildProjection();
+        }
+
+        /// <summary>
+        /// Build the first projection from a seed index.
+        /// </summary>
+        /// <remarks>
+        /// The seed is produced by <c>git read-tree</c>, so it holds every entry but no
+        /// skip-worktree bits. That is expected: under a virtual filesystem the bit is recomputed
+        /// on every index read rather than stored, so the parser reconstructs it (see
+        /// <c>GitIndexParser.EntryIsProjected</c>).
+        /// <para>
+        /// The seed is consumed at most once. It is deleted whether or not the parse succeeds, so
+        /// a stale or corrupt seed can never affect a later mount, and any failure falls back to
+        /// the normal path rather than leaving the mount without a projection.
+        /// </para>
+        /// <para>
+        /// The seed is never persisted as the projection backup. The backup is re-parsed on a
+        /// later mount in normal mode, where an entry is projected only if it carries the
+        /// skip-worktree bit; a seed carries none, so persisting it would make the next mount
+        /// project nothing and serve an empty working tree while reporting ready.
+        /// </para>
+        /// </remarks>
+        private bool TryBuildProjectionFromSeed(string seedPath)
+        {
+            try
+            {
+                using (ITracer tracer = this.context.Tracer.StartActivity("ParseGitIndexSeed", EventLevel.Informational))
+                {
+                    try
+                    {
+                        this.SetProjectionInvalid(false);
+                        using (FileStream indexStream = new FileStream(seedPath, FileMode.Open, FileAccess.Read, FileShare.Read, IndexFileStreamBufferSize))
+                        {
+                            this.indexParser.RebuildProjection(
+                                tracer,
+                                indexStream,
+                                seedMode: true,
+                                materializedPaths: this.modifiedPaths.GetAllModifiedPaths());
+                        }
+
+                        // Persist the repository's own index as the backup, NOT the seed. The
+                        // backup is re-parsed on a later mount in normal mode, where an entry is
+                        // projected only if it carries the skip-worktree bit. A seed comes from
+                        // read-tree and carries none, so persisting it would project nothing and
+                        // the next mount would serve an empty working tree while reporting ready.
+                        this.context.FileSystem.CopyFile(this.indexPath, this.projectionIndexBackupPath, overwrite: true);
+
+                        EventMetadata metadata = CreateEventMetadata();
+                        metadata.Add(TracingConstants.MessageKey.InfoMessage, "Built the projection from the seed index");
+                        tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_Used", metadata);
+                        return true;
+                    }
+                    catch (Exception e)
+                    {
+                        // The seed is an optimization. Any failure must fall back to the normal
+                        // build rather than fail the mount.
+                        EventMetadata metadata = CreateEventMetadata(e);
+                        metadata.Add(TracingConstants.MessageKey.WarningMessage, "Failed to build the projection from the seed index; falling back to the index");
+                        tracer.RelatedEvent(EventLevel.Warning, "ProjectionSeed_Failed", metadata);
+                        return false;
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    this.context.FileSystem.DeleteFile(seedPath);
+                }
+                catch (Exception e)
+                {
+                    EventMetadata metadata = CreateEventMetadata(e);
+                    metadata.Add(TracingConstants.MessageKey.InfoMessage, "Failed to delete the seed index");
+                    this.context.Tracer.RelatedEvent(EventLevel.Informational, "ProjectionSeed_DeleteFailed", metadata);
+                }
+            }
         }
 
         private void BuildProjection()

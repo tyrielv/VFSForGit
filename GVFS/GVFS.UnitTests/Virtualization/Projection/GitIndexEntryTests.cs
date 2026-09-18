@@ -173,6 +173,66 @@ namespace GVFS.UnitTests.Virtualization.Git
             }
         }
 
+        [TestCase]
+        public void SparseDirectory_LogicalLengthParse_StripsTrailingSlash()
+        {
+            GitIndexEntry indexEntry = new GitIndexEntry(this.buildingNewProjection);
+            byte[] pathBuffer = Encoding.UTF8.GetBytes("GVFS/");
+            Buffer.BlockCopy(pathBuffer, 0, indexEntry.PathBuffer, 0, pathBuffer.Length);
+            indexEntry.PathLength = pathBuffer.Length;
+
+            indexEntry.PathEndsInSlash.ShouldBeTrue();
+            indexEntry.IsSparseDirectory.ShouldBeTrue();
+            indexEntry.ProjectionPathLength.ShouldEqual(pathBuffer.Length - 1);
+
+            if (this.buildingNewProjection)
+            {
+                indexEntry.ClearLastParent();
+                indexEntry.BuildingProjection_ParsePath(indexEntry.ProjectionPathLength);
+
+                indexEntry.BuildingProjection_NumParts.ShouldEqual(1);
+                indexEntry.BuildingProjection_PathParts[0].GetString().ShouldEqual("GVFS");
+                indexEntry.BuildingProjection_GetChildName().GetString().ShouldEqual("GVFS");
+            }
+        }
+
+        [TestCase]
+        public void SparseDirectory_LogicalLengthParse_NestedFolder()
+        {
+            GitIndexEntry indexEntry = new GitIndexEntry(this.buildingNewProjection);
+            byte[] pathBuffer = Encoding.UTF8.GetBytes("a/b/c/");
+            Buffer.BlockCopy(pathBuffer, 0, indexEntry.PathBuffer, 0, pathBuffer.Length);
+            indexEntry.PathLength = pathBuffer.Length;
+
+            indexEntry.IsSparseDirectory.ShouldBeTrue();
+            indexEntry.ProjectionPathLength.ShouldEqual(pathBuffer.Length - 1);
+
+            if (this.buildingNewProjection)
+            {
+                indexEntry.ClearLastParent();
+                indexEntry.BuildingProjection_ParsePath(indexEntry.ProjectionPathLength);
+
+                indexEntry.BuildingProjection_NumParts.ShouldEqual(3);
+                indexEntry.BuildingProjection_PathParts[0].GetString().ShouldEqual("a");
+                indexEntry.BuildingProjection_PathParts[1].GetString().ShouldEqual("b");
+                indexEntry.BuildingProjection_PathParts[2].GetString().ShouldEqual("c");
+                indexEntry.BuildingProjection_GetChildName().GetString().ShouldEqual("c");
+            }
+        }
+
+        [TestCase]
+        public void RegularFile_IsNotSparseDirectory()
+        {
+            GitIndexEntry indexEntry = new GitIndexEntry(this.buildingNewProjection);
+            byte[] pathBuffer = Encoding.UTF8.GetBytes("folder/file.txt");
+            Buffer.BlockCopy(pathBuffer, 0, indexEntry.PathBuffer, 0, pathBuffer.Length);
+            indexEntry.PathLength = pathBuffer.Length;
+
+            indexEntry.PathEndsInSlash.ShouldBeFalse();
+            indexEntry.IsSparseDirectory.ShouldBeFalse();
+            indexEntry.ProjectionPathLength.ShouldEqual(pathBuffer.Length);
+        }
+
         private GitIndexEntry SetupIndexEntry(string path)
         {
             GitIndexEntry indexEntry = new GitIndexEntry(this.buildingNewProjection);

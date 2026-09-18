@@ -13,6 +13,24 @@ namespace GVFS.Common.Git
 {
     public class GitProcess : ICredentialStore
     {
+        /// <summary>
+        /// The exact line emitted by 'git version --build-options' when the git build carries the
+        /// VFS for Git sparse-index changes. Stock git omits it. Match it anchored, one line. Both
+        /// 'gvfs clone --sparse-index' and 'gvfs sparse-index --enable' probe for this line and
+        /// fail fast when it is absent. See decisions/0018.
+        /// </summary>
+        public const string VfsSparseIndexCapabilityLine = "feature: vfs-sparse-index";
+
+        /// <summary>
+        /// The user-facing error when the configured git does not advertise the sparse-index
+        /// capability. Shared by every entry point that gates on the capability so the message
+        /// does not diverge.
+        /// </summary>
+        public const string MissingVfsSparseIndexCapabilityError =
+            "The sparse index requires a git build with VFS for Git sparse-index support. " +
+            "The configured git does not advertise 'feature: vfs-sparse-index' in " +
+            "'git version --build-options'. Install a git build that includes these changes, then retry.";
+
         private const int HResultEHANDLE = -2147024890; // 0x80070006 E_HANDLE
 
         /// <summary>
@@ -161,6 +179,56 @@ namespace GVFS.Common.Git
 
             error = null;
             return true;
+        }
+
+        /// <summary>
+        /// Determines whether the given git build advertises VFS for Git sparse-index support.
+        /// A capable build emits the line 'feature: vfs-sparse-index' under
+        /// 'git version --build-options'; stock git omits it. This capability is the hard
+        /// prerequisite for sparse-index mode: without it, git re-expands the index in-process
+        /// during a checkout under core.virtualfilesystem and silently writes a FULL index, so
+        /// 'gvfs clone --sparse-index' and 'gvfs sparse-index --enable' must fail fast when the
+        /// probe returns false. See decisions/0018 (the capability) and decisions/0015 (why the
+        /// feature depends on it).
+        /// </summary>
+        /// <remarks>
+        /// Probe the git that GVFS is configured to use (an enlistment's GitBinPath), never a
+        /// hardcoded path: the user may have several git installs, and only the configured one is
+        /// the git GVFS actually runs.
+        /// </remarks>
+        public static bool SupportsVfsSparseIndex(string gitBinPath)
+        {
+            GitProcess gitProcess = new GitProcess(gitBinPath, null);
+            Result result = gitProcess.InvokeGitOutsideEnlistment("version --build-options");
+            if (result.ExitCodeIsFailure)
+            {
+                return false;
+            }
+
+            return HasVfsSparseIndexCapability(result.Output);
+        }
+
+        /// <summary>
+        /// Parses the output of 'git version --build-options' and returns true when it contains a
+        /// line equal to 'feature: vfs-sparse-index' (anchored, one line). Separated from the git
+        /// spawn so it can be unit-tested without a git binary.
+        /// </summary>
+        public static bool HasVfsSparseIndexCapability(string buildOptionsOutput)
+        {
+            if (string.IsNullOrEmpty(buildOptionsOutput))
+            {
+                return false;
+            }
+
+            foreach (string line in buildOptionsOutput.Split('\n'))
+            {
+                if (line.Trim().Equals(VfsSparseIndexCapabilityLine, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -552,6 +620,55 @@ namespace GVFS.Common.Git
             return this.InvokeGitInWorkingDirectoryRoot("checkout -f " + target, useReadObjectHook: false);
         }
 
+        /// <summary>
+        /// Write a full (non-sparse) index for HEAD to <paramref name="seedPath"/> without
+        /// touching the working tree or the repository's own index.
+        /// </summary>
+        /// <remarks>
+        /// Used as a projection seed. A sparse index never records the collapsed trees, so a cold
+        /// projection build would otherwise have to read them all; writing this seed while the
+        /// mount is doing something else lets the first projection be parsed instead.
+        /// <para>
+        /// <c>GIT_INDEX_FILE</c> points git at the seed for both reading and writing, so it never
+        /// locks the repository's own index and can run alongside other git commands.
+        /// <c>--index-output</c> is not sufficient: it redirects only the write, and git still
+        /// takes <c>.git/index.lock</c>, which fails a concurrent checkout with
+        /// "Unable to create index.lock: File exists". <c>read-tree</c> writes no working-tree
+        /// files, so there is no working-tree contention either.
+        /// </para>
+        /// <para>
+        /// Both virtualization hooks are disabled. The read-object hook is disabled to match
+        /// <see cref="ForceCheckout"/>: a missing tree then fails this command rather than
+        /// hanging, which is safe because the seed is an optimization and every caller ignores
+        /// failure. The virtual-filesystem hook is disabled because it queries the mount over a
+        /// named pipe, and a mount that is still starting refuses that request -- so a seed run
+        /// during mount startup would fail through no fault of its own.
+        /// </para>
+        /// <para>
+        /// Disabling the virtual-filesystem hook does not change the output: <c>read-tree</c>
+        /// rebuilds every entry from the tree, and <c>apply_virtualfilesystem()</c> runs on index
+        /// read rather than write, so the hook's answer cannot reach the file. Verified by
+        /// comparing a seed written with the hook against one written without it -- byte
+        /// identical, including the absence of skip-worktree bits. Those bits are recomputed on
+        /// every index read rather than stored, and the parser reconstructs them when it consumes
+        /// the seed. See decisions/0022.
+        /// </para>
+        /// </remarks>
+        public Result WriteProjectionSeedIndex(string seedPath)
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.IndexSparseName + "=false" +
+                    " -c " + GitConfigSetting.CoreVirtualFileSystemName + "= read-tree HEAD",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: false,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false,
+                indexFileOverride: seedPath);
+        }
+
         public Result Reset(string target, string paths)
         {
             return this.InvokeGitInWorkingDirectoryRoot($"reset {target} {paths}", useReadObjectHook: false);
@@ -888,6 +1005,128 @@ namespace GVFS.Common.Git
             return this.InvokeGitAgainstDotGitFolder("read-tree " + treeIsh);
         }
 
+        /// <summary>
+        /// Expands the on-disk index from a sparse (collapsed) index back to a full index,
+        /// in place, without changing the working tree. This is the recovery path for a
+        /// persisted sparse index that VFS for Git cannot yet project.
+        /// </summary>
+        /// <remarks>
+        /// Must run with GVFS unmounted, so every GVFS hook is neutralized:
+        ///   -c core.virtualfilesystem=   disables the VFS hook, which otherwise blocks on a
+        ///                                named pipe to a mount that is not running.
+        ///   -c core.hookspath=           disables the GVFS pre-command hook, which aborts git
+        ///                                commands when the mount is down.
+        ///   -c index.sparse=false        forces git to write a full (expanded) index.
+        /// COMMAND_HOOK_LOCK=true (usePreCommandHook: false) is belt-and-suspenders for the
+        /// pre-command hook. --force-write-index makes git rewrite the index even though no
+        /// tracked content changed; reading the sparse index expands it in-core and, with
+        /// index.sparse=false, the rewrite persists the expanded form. Unlike read-tree HEAD,
+        /// this does not reset staged changes, so it is safe against data loss.
+        /// </remarks>
+        public Result ForceExpandSparseIndex()
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.CoreVirtualFileSystemName + "= -c core.hookspath= -c " + GitConfigSetting.IndexSparseName + "=false update-index --force-write-index",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: false,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false);
+        }
+
+        /// <summary>
+        /// Reconciles the on-disk index to the current cone-mode sparse-checkout patterns,
+        /// collapsing out-of-cone directories to sparse-directory entries, in place, without
+        /// touching the working tree. Used by automatic sparse-index cone management after the
+        /// mount rewrites the sparse-checkout file, so the collapse is applied while mounted.
+        /// </summary>
+        /// <remarks>
+        /// Runs while GVFS is mounted, so - unlike <see cref="ForceExpandSparseIndex"/>, which
+        /// runs unmounted - it must KEEP the virtual filesystem enabled and keep the hooks path
+        /// intact. This mirrors the proven in-mount collapse command that
+        /// SparseIndexProjectionTests runs against a live mount, and the only other in-mount
+        /// index writer, <c>HandleDehydrateFolders</c>'s <c>git reset</c>:
+        ///   * <c>core.virtualfilesystem</c> stays set, so the live ProjFS provider still owns
+        ///     skip-worktree. Disabling it here makes the in-process index write fail with
+        ///     "fatal: Unable to write new index file" against the mounted provider, and would
+        ///     also re-enable clear_skip_worktree_from_present_files() and clear the very bits
+        ///     that let the index collapse. (The unmounted recipe in decisions/0015 disables VFS
+        ///     and adds sparse.expectFilesOutsideOfPatterns to compensate; the in-mount handler
+        ///     does neither. See decisions/0019.)
+        ///   * The read-object hook is left ENABLED (useReadObjectHook: true). Writing a
+        ///     collapsed (index.sparse=true) index makes git read HEAD tree objects to form the
+        ///     sparse-directory entries; under ProjFS some of those trees can still be virtual,
+        ///     so disabling object virtualization (core.virtualizeobjects=false) fails the write
+        ///     with "fatal: Unable to write new index file". The proven in-mount collapse in
+        ///     SparseIndexProjectionTests keeps object virtualization on for the same reason.
+        ///   * The hooks path is left at its default. git consults the virtualfilesystem hook
+        ///     while writing the index to learn which entries are present; emptying
+        ///     <c>core.hookspath</c> hides that hook and also fails the write. Anti-recursion
+        ///     does not need it: COMMAND_HOOK_LOCK=true (usePreCommandHook: false) already makes
+        ///     the GVFS pre-command hook bail, exactly as <c>git reset</c> relies on for
+        ///     dehydrate, so this git process cannot re-enter the mount pipe with a widen.
+        ///   * <c>-c core.sparseCheckout=true -c core.sparseCheckoutCone=true</c> keep cone-mode
+        ///     matching on, and <c>-c index.sparse=true</c> makes git write a collapsed sparse
+        ///     index.
+        /// --force-write-index makes git rewrite the index even though no tracked content
+        /// changed, so the new patterns take effect. Unlike sparse-checkout reapply, this never
+        /// walks the working tree, so it is both safe on a live ProjFS mount and fast at scale.
+        /// See decisions/0011, 0015, and 0019.
+        /// </remarks>
+        public Result ForceCollapseSparseIndex()
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.CoreSparseCheckoutName + "=true"
+                + " -c " + GitConfigSetting.CoreSparseCheckoutConeName + "=true"
+                + " -c " + GitConfigSetting.IndexSparseName + "=true"
+                + " update-index --force-write-index",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: true,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false);
+        }
+
+        /// <summary>
+        /// Collapses the on-disk index to a sparse index in place, without walking the
+        /// working tree. This is the mirror of <see cref="ForceExpandSparseIndex"/> and is
+        /// used at clone time to construct a sparse index directly from the freshly written
+        /// full index, so the enlistment is already sparse before its first mount.
+        /// </summary>
+        /// <remarks>
+        /// Must run with GVFS unmounted, so every GVFS hook is neutralized:
+        ///   -c core.virtualfilesystem=   disables the VFS hook, which otherwise blocks on a
+        ///                                named pipe to a mount that is not running.
+        ///   -c core.hookspath=           disables the GVFS pre-command hook, which aborts git
+        ///                                commands when the mount is down.
+        ///   -c index.sparse=true         forces git to write a sparse (collapsed) index.
+        ///   -c sparse.expectFilesOutsideOfPatterns=true  keeps clear_skip_worktree_from_present_files
+        ///                                from clearing skip-worktree on the present files that
+        ///                                VFS for Git keeps outside the cone; without it, disabling
+        ///                                VFS re-expands the index (see decisions/0001).
+        /// --force-write-index makes git rewrite the index even though no tracked content
+        /// changed; convert_to_sparse collapses the out-of-cone directories in place. Unlike
+        /// sparse-checkout reapply, this does not iterate the working tree, so it stays cheap
+        /// at scale. On a freshly cloned index (skip-worktree set on every entry, valid
+        /// cache-tree) it collapses to the minimal cone. See decisions/0015.
+        /// </remarks>
+        public Result CollapseSparseIndex()
+        {
+            return this.InvokeGitImpl(
+                "-c " + GitConfigSetting.CoreVirtualFileSystemName + "= -c core.hookspath= -c " + GitConfigSetting.SparseExpectFilesOutsideOfPatternsName + "=true -c " + GitConfigSetting.IndexSparseName + "=true update-index --force-write-index",
+                workingDirectory: this.workingDirectoryRoot,
+                dotGitDirectory: null,
+                useReadObjectHook: false,
+                writeStdIn: null,
+                parseStdOutLine: null,
+                timeoutMs: -1,
+                usePreCommandHook: false);
+        }
+
         public Result PrunePacked(string gitObjectDirectory)
         {
             return this.InvokeGitAgainstDotGitFolder(
@@ -908,6 +1147,11 @@ namespace GVFS.Common.Git
         }
 
         public Process GetGitProcess(string command, string workingDirectory, string dotGitDirectory, bool useReadObjectHook, string gitObjectsDirectory, bool usePreCommandHook)
+        {
+            return this.GetGitProcess(command, workingDirectory, dotGitDirectory, useReadObjectHook, gitObjectsDirectory, usePreCommandHook, indexFileOverride: null);
+        }
+
+        public Process GetGitProcess(string command, string workingDirectory, string dotGitDirectory, bool useReadObjectHook, string gitObjectsDirectory, bool usePreCommandHook, string indexFileOverride)
         {
             ProcessStartInfo processInfo = new ProcessStartInfo(this.gitBinPath);
             processInfo.WorkingDirectory = workingDirectory;
@@ -969,6 +1213,14 @@ namespace GVFS.Common.Git
                 processInfo.EnvironmentVariables["COMMAND_HOOK_LOCK"] = "true";
             }
 
+            if (!string.IsNullOrEmpty(indexFileOverride))
+            {
+                // Point git at a different index for both reading and writing. --index-output only
+                // redirects the write: git still locks the repository's own index, which makes a
+                // concurrent checkout fail with "Unable to create index.lock: File exists".
+                processInfo.EnvironmentVariables["GIT_INDEX_FILE"] = indexFileOverride;
+            }
+
             if (!string.IsNullOrEmpty(dotGitDirectory))
             {
                 command = "--git-dir=\"" + dotGitDirectory + "\" " + command;
@@ -991,7 +1243,8 @@ namespace GVFS.Common.Git
             Action<string> parseStdOutLine,
             int timeoutMs,
             string gitObjectsDirectory = null,
-            bool usePreCommandHook = true)
+            bool usePreCommandHook = true,
+            string indexFileOverride = null)
         {
             if (failedToSetEncoding && writeStdIn != null)
             {
@@ -1003,7 +1256,7 @@ namespace GVFS.Common.Git
                 // From https://msdn.microsoft.com/en-us/library/system.diagnostics.process.standardoutput.aspx
                 // To avoid deadlocks, use asynchronous read operations on at least one of the streams.
                 // Do not perform a synchronous read to the end of both redirected streams.
-                using (this.executingProcess = this.GetGitProcess(command, workingDirectory, dotGitDirectory, useReadObjectHook, gitObjectsDirectory: gitObjectsDirectory, usePreCommandHook: usePreCommandHook))
+                using (this.executingProcess = this.GetGitProcess(command, workingDirectory, dotGitDirectory, useReadObjectHook, gitObjectsDirectory: gitObjectsDirectory, usePreCommandHook: usePreCommandHook, indexFileOverride: indexFileOverride))
                 {
                     // Bound how much stdout/stderr we buffer so a pathologically noisy git command
                     // cannot grow these buffers without limit until GVFS.Mount hits an

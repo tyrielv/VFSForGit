@@ -134,6 +134,57 @@ namespace GVFS.FunctionalTests.Tools
             return CloneAndMount(pathToGvfs, enlistmentRoot, commitish, localCache, skipPrefetch: false, serviceName: serviceName);
         }
 
+        /// <summary>
+        /// Clones an enlistment with 'gvfs clone --no-mount' (optionally '--sparse-index') and
+        /// returns it without mounting. Unlike <see cref="CloneAndMount(string, string, string, bool, string)"/>,
+        /// this does not run the post-clone git commands (they require a mount), so the caller can
+        /// inspect the on-disk index before the first mount and then time the first mount itself.
+        /// Used by the clone-time sparse-index test.
+        /// </summary>
+        public static GVFSFunctionalTestEnlistment CloneNoMount(string pathToGvfs, bool sparseIndex = false)
+        {
+            GVFSFunctionalTestEnlistment enlistment = new GVFSFunctionalTestEnlistment(
+                pathToGvfs,
+                GetUniqueEnlistmentRoot(),
+                GVFSTestConfig.RepoToClone,
+                Properties.Settings.Default.Commitish,
+                GVFSTestConfig.LocalCacheRoot,
+                serviceName: null);
+
+            try
+            {
+                enlistment.CloneNoMount(sparseIndex);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Unhandled exception in CloneNoMount: " + e.ToString());
+                TestResultsHelper.OutputGVFSLogs(enlistment);
+                throw;
+            }
+
+            return enlistment;
+        }
+
+        /// <summary>
+        /// Runs 'gvfs clone --sparse-index --no-mount' expecting it to fail (the configured git does
+        /// not advertise the sparse-index capability), and returns the enlistment - whose only
+        /// artifact is the partially-created root - together with the captured clone output. The
+        /// caller asserts the failure and then deletes the root. Used by the fail-fast test.
+        /// </summary>
+        public static GVFSFunctionalTestEnlistment CloneSparseIndexExpectingCapabilityFailure(string pathToGvfs, out string cloneOutput)
+        {
+            GVFSFunctionalTestEnlistment enlistment = new GVFSFunctionalTestEnlistment(
+                pathToGvfs,
+                GetUniqueEnlistmentRoot(),
+                GVFSTestConfig.RepoToClone,
+                Properties.Settings.Default.Commitish,
+                GVFSTestConfig.LocalCacheRoot,
+                serviceName: null);
+
+            cloneOutput = enlistment.gvfsProcess.CloneSparseIndexExpectingFailure(enlistment.RepoUrl, enlistment.Commitish);
+            return enlistment;
+        }
+
         public static string GetUniqueEnlistmentRoot()
         {
             return Path.Combine(Properties.Settings.Default.EnlistmentRoot, Guid.NewGuid().ToString("N").Substring(0, 20));
@@ -302,6 +353,20 @@ namespace GVFS.FunctionalTests.Tools
             {
                 File.ReadAllBytes(rootGitIgnorePath);
             }
+        }
+
+        /// <summary>
+        /// Runs 'gvfs clone --no-mount' (optionally '--sparse-index') and returns without mounting
+        /// or running the post-clone git commands. The caller mounts explicitly so it can inspect
+        /// the on-disk index before the first mount and time the first mount.
+        /// </summary>
+        public void CloneNoMount(bool sparseIndex)
+        {
+            Console.Error.WriteLine($"[CI-DEBUG] CloneNoMount: starting clone of {this.RepoUrl} (sparseIndex={sparseIndex})");
+            Console.Error.Flush();
+            this.gvfsProcess.Clone(this.RepoUrl, this.Commitish, skipPrefetch: false, sparseIndex: sparseIndex, noMount: true);
+            Console.Error.WriteLine("[CI-DEBUG] CloneNoMount: clone complete (not mounted)");
+            Console.Error.Flush();
         }
 
         public bool IsMounted()

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 
 namespace GVFS.FunctionalTests.Properties
 {
@@ -82,9 +83,41 @@ namespace GVFS.FunctionalTests.Properties
                     PathToGVFSService = @"C:\Program Files\VFS for Git\GVFS.Service.exe";
                 }
 
-                PathToGit = @"C:\Program Files\Git\cmd\git.exe";
-                PathToBash = @"C:\Program Files\Git\bin\bash.exe";
+                // Resolve the Git installation the way the product does, from the
+                // GitForWindows registry key that WindowsGitInstallation reads. The default
+                // location is not stable: the Git for Windows installer relocates an existing
+                // installation when it is pointed at a different directory, so a hard-coded
+                // "C:\Program Files\Git" stops existing after such a move and every test
+                // fails on a missing git rather than on the behavior under test.
+                string gitInstallRoot = GetGitInstallRoot();
+                PathToGit = Path.Combine(gitInstallRoot, @"cmd\git.exe");
+                PathToBash = Path.Combine(gitInstallRoot, @"bin\bash.exe");
             }
+        }
+
+        private static string GetGitInstallRoot()
+        {
+            const string DefaultGitInstallRoot = @"C:\Program Files\Git";
+
+            try
+            {
+                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\GitForWindows"))
+                {
+                    string installPath = key?.GetValue("InstallPath") as string;
+                    if (!string.IsNullOrWhiteSpace(installPath) &&
+                        File.Exists(Path.Combine(installPath, @"cmd\git.exe")))
+                    {
+                        return installPath;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // Fall through to the default: a readable registry is not required, and a
+                // clear "git not found at <path>" failure is better than a registry error.
+            }
+
+            return DefaultGitInstallRoot;
         }
     }
 }

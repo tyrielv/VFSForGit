@@ -62,6 +62,11 @@ namespace GVFS.Virtualization.Projection
                 return this.ChildEntries.AddFile(name, shaBytes);
             }
 
+            public FolderData AddChildFolder(LazyUTF8String name, bool isIncluded)
+            {
+                return this.ChildEntries.AddFolder(name, isIncluded);
+            }
+
             public void Include()
             {
                 this.IsIncluded = true;

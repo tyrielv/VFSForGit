@@ -1,6 +1,7 @@
 ﻿using GVFS.Common.Git;
 using GVFS.Tests.Should;
 using GVFS.UnitTests.Mock.Common;
+using GVFS.UnitTests.Mock.Git;
 using NUnit.Framework;
 using System.Diagnostics;
 
@@ -100,6 +101,96 @@ namespace GVFS.UnitTests.Git
             processName.ShouldBeNull();
             exitCode.ShouldEqual(-1);
             error.ShouldBeNull();
+        }
+
+        [TestCase]
+        public void CollapseSparseIndexIssuesForceWriteIndexWithHooksDisabledAndSparseOn()
+        {
+            // Clone-time sparse construction collapses the freshly written full index in place.
+            // The command must disable every GVFS hook (no mount is running), keep skip-worktree
+            // on present files (sparse.expectFilesOutsideOfPatterns=true), and force a sparse
+            // rewrite (index.sparse=true) via update-index --force-write-index.
+            MockGitProcess git = new MockGitProcess();
+            string expectedCommand =
+                "-c core.virtualfilesystem= -c core.hookspath= -c sparse.expectFilesOutsideOfPatterns=true -c index.sparse=true update-index --force-write-index";
+            git.SetExpectedCommandResult(expectedCommand, () => new GitProcess.Result(string.Empty, string.Empty, 0));
+
+            GitProcess.Result result = git.CollapseSparseIndex();
+
+            result.ExitCodeIsSuccess.ShouldBeTrue();
+            git.CommandsRun.Count.ShouldEqual(1);
+            git.CommandsRun[0].ShouldEqual(expectedCommand);
+        }
+
+        [TestCase]
+        public void CollapseSparseIndexIsTheInverseOfForceExpandSparseIndex()
+        {
+            // The only differences between collapse and expand are the index.sparse value and
+            // the extra sparse.expectFilesOutsideOfPatterns guard that collapse needs. Both
+            // neutralize the GVFS hooks and use update-index --force-write-index.
+            MockGitProcess collapseGit = new MockGitProcess();
+            collapseGit.SetExpectedCommandResult(string.Empty, () => new GitProcess.Result(string.Empty, string.Empty, 0), matchPrefix: true);
+            collapseGit.CollapseSparseIndex();
+
+            MockGitProcess expandGit = new MockGitProcess();
+            expandGit.SetExpectedCommandResult(string.Empty, () => new GitProcess.Result(string.Empty, string.Empty, 0), matchPrefix: true);
+            expandGit.ForceExpandSparseIndex();
+
+            collapseGit.CommandsRun[0].Contains("index.sparse=true").ShouldBeTrue();
+            collapseGit.CommandsRun[0].Contains("sparse.expectFilesOutsideOfPatterns=true").ShouldBeTrue();
+            expandGit.CommandsRun[0].Contains("index.sparse=false").ShouldBeTrue();
+            expandGit.CommandsRun[0].Contains("update-index --force-write-index").ShouldBeTrue();
+            collapseGit.CommandsRun[0].Contains("update-index --force-write-index").ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_TrueWhenLinePresent()
+        {
+            string buildOptions =
+                "git version 2.55.0.vfs.0.8.10.gd332ac45f5\n" +
+                "cpu: x86_64\n" +
+                "feature: fsmonitor--daemon\n" +
+                "feature: vfs-sparse-index\n";
+
+            GitProcess.HasVfsSparseIndexCapability(buildOptions).ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_TrueWithWindowsLineEndings()
+        {
+            string buildOptions =
+                "git version 2.55.0.vfs.0.8.10\r\n" +
+                "feature: fsmonitor--daemon\r\n" +
+                "feature: vfs-sparse-index\r\n";
+
+            GitProcess.HasVfsSparseIndexCapability(buildOptions).ShouldBeTrue();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_FalseWhenLineAbsent()
+        {
+            // Stock git build options: no vfs-sparse-index feature line.
+            string buildOptions =
+                "git version 2.55.0.vfs.0.8\n" +
+                "cpu: x86_64\n" +
+                "feature: fsmonitor--daemon\n";
+
+            GitProcess.HasVfsSparseIndexCapability(buildOptions).ShouldBeFalse();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_FalseForNearMissLines()
+        {
+            // The match is anchored to the whole line; a longer or embedded token must not match.
+            GitProcess.HasVfsSparseIndexCapability("feature: vfs-sparse-index-experimental\n").ShouldBeFalse();
+            GitProcess.HasVfsSparseIndexCapability("xfeature: vfs-sparse-index\n").ShouldBeFalse();
+        }
+
+        [TestCase]
+        public void HasVfsSparseIndexCapability_FalseForEmptyOrNull()
+        {
+            GitProcess.HasVfsSparseIndexCapability(null).ShouldBeFalse();
+            GitProcess.HasVfsSparseIndexCapability(string.Empty).ShouldBeFalse();
         }
 
         [TestCase]
@@ -365,7 +456,36 @@ this is an error",
                 "path\\with\\backslashes\\file.txt",
             };
 
-            string gitPath = "C:\\Program Files\\Git\\cmd\\git.exe";
+            // Resolve git the way the product does, from the GitForWindows registry key, rather
+            // than assuming the default install location: the Git for Windows installer relocates
+            // an existing installation when pointed elsewhere, so the default path can be absent
+            // on a machine where git works fine.
+            string gitPath = null;
+            try
+            {
+                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\GitForWindows"))
+                {
+                    string installPath = key?.GetValue("InstallPath") as string;
+                    if (!string.IsNullOrWhiteSpace(installPath))
+                    {
+                        string candidate = System.IO.Path.Combine(installPath, @"cmd\git.exe");
+                        if (System.IO.File.Exists(candidate))
+                        {
+                            gitPath = candidate;
+                        }
+                    }
+                }
+            }
+            catch (System.Exception)
+            {
+                // Fall through to the default below.
+            }
+
+            if (gitPath == null)
+            {
+                gitPath = "C:\\Program Files\\Git\\cmd\\git.exe";
+            }
+
             if (!System.IO.File.Exists(gitPath))
             {
                 Assert.Ignore("Git not found at expected path — skipping integration test");

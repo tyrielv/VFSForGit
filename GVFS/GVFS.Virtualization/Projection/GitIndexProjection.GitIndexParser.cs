@@ -26,6 +26,25 @@ namespace GVFS.Virtualization.Projection
             private GitIndexProjection projection;
 
             /// <summary>
+            /// Set only while parsing a clone-time seed index, which carries no skip-worktree bits
+            /// (see <see cref="EntryIsProjected"/>).
+            /// </summary>
+            private bool assumeSkipWorktree;
+
+            /// <summary>
+            /// UTF-8 paths that are materialized in the working tree, used only in seed mode. These
+            /// stand in for the paths the virtual-filesystem hook would report as present.
+            /// </summary>
+            private List<byte[]> materializedPathBytes = new List<byte[]>();
+
+            /// <summary>
+            /// Entries seen and entries projected during the current <see cref="RebuildProjection"/>.
+            /// Used only to detect a degenerate result; see the check at the end of that method.
+            /// </summary>
+            private long entriesSeenInBuild;
+            private long entriesProjectedInBuild;
+
+            /// <summary>
             /// A single GitIndexEntry instance used for parsing all entries in the index when building the projection
             /// </summary>
             private GitIndexEntry resuableProjectionBuildingIndexEntry = new GitIndexEntry(buildingNewProjection: true);
@@ -108,24 +127,110 @@ namespace GVFS.Virtualization.Projection
                 return dirs.Count;
             }
 
+            /// <summary>
+            /// Parse an index and return the full path of every entry, in index order. This is a
+            /// test and diagnostic helper: it exercises the same v4 prefix-decompression path as
+            /// projection building, but without a <see cref="GitIndexProjection"/>. It reads the
+            /// raw path buffer, so a sparse-directory entry's trailing '/' is preserved. Use it to
+            /// verify that a trailing-slash entry does not corrupt the next entry's decompressed
+            /// path.
+            /// </summary>
+            internal static List<string> GetIndexPaths(ITracer tracer, Stream indexStream)
+            {
+                List<string> paths = new List<string>();
+                GitIndexParser indexParser = new GitIndexParser(null);
+
+                FileSystemTaskResult result = indexParser.ParseIndex(
+                    tracer,
+                    indexStream,
+                    indexParser.resuableProjectionBuildingIndexEntry,
+                    entry =>
+                    {
+                        paths.Add(Encoding.UTF8.GetString(entry.PathBuffer, 0, entry.PathLength));
+                        return FileSystemTaskResult.Success;
+                    });
+
+                if (result != FileSystemTaskResult.Success)
+                {
+                    throw new InvalidOperationException($"{nameof(GetIndexPaths)} failed: {result}");
+                }
+
+                return paths;
+            }
+
             public void RebuildProjection(ITracer tracer, Stream indexStream)
+            {
+                this.RebuildProjection(tracer, indexStream, seedMode: false, materializedPaths: null);
+            }
+
+            /// <summary>
+            /// Rebuild the projection from an index stream.
+            /// </summary>
+            /// <param name="seedMode">
+            /// True when the stream is a clone-time seed index. A seed carries no skip-worktree
+            /// bits, so every entry is treated as projected except the supplied materialized
+            /// paths. See <see cref="EntryIsProjected"/> for why that matches what git computes.
+            /// </param>
+            /// <param name="materializedPaths">
+            /// Git-relative paths present in the working tree, used only in seed mode.
+            /// </param>
+            public void RebuildProjection(ITracer tracer, Stream indexStream, bool seedMode, IEnumerable<string> materializedPaths)
             {
                 if (this.projection == null)
                 {
                     throw new InvalidOperationException($"{nameof(this.projection)} cannot be null when calling {nameof(this.RebuildProjection)}");
                 }
 
-                this.projection.ClearProjectionCaches();
-                FileSystemTaskResult result = this.ParseIndex(
-                    tracer,
-                    indexStream,
-                    this.resuableProjectionBuildingIndexEntry,
-                    this.AddIndexEntryToProjection);
-
-                if (result != FileSystemTaskResult.Success)
+                this.assumeSkipWorktree = seedMode;
+                this.materializedPathBytes.Clear();
+                if (seedMode && materializedPaths != null)
                 {
-                    // RebuildProjection should always result in FileSystemTaskResult.Success (or a thrown exception)
-                    throw new InvalidOperationException($"{nameof(this.RebuildProjection)}: {nameof(GitIndexParser.ParseIndex)} failed to {nameof(this.AddIndexEntryToProjection)}");
+                    foreach (string materializedPath in materializedPaths)
+                    {
+                        if (!string.IsNullOrEmpty(materializedPath))
+                        {
+                            this.materializedPathBytes.Add(
+                                Encoding.UTF8.GetBytes(materializedPath.Replace('\\', GVFSConstants.GitPathSeparator)));
+                        }
+                    }
+                }
+
+                try
+                {
+                    this.projection.ClearProjectionCaches();
+                    this.entriesSeenInBuild = 0;
+                    this.entriesProjectedInBuild = 0;
+                    FileSystemTaskResult result = this.ParseIndex(
+                        tracer,
+                        indexStream,
+                        this.resuableProjectionBuildingIndexEntry,
+                        this.AddIndexEntryToProjection);
+
+                    if (result != FileSystemTaskResult.Success)
+                    {
+                        // RebuildProjection should always result in FileSystemTaskResult.Success (or a thrown exception)
+                        throw new InvalidOperationException($"{nameof(this.RebuildProjection)}: {nameof(GitIndexParser.ParseIndex)} failed to {nameof(this.AddIndexEntryToProjection)}");
+                    }
+
+                    // An index with entries that projects none of them is always wrong, and it is
+                    // wrong in the worst way: the mount reports ready and serves an empty working
+                    // tree. It happens when the stored skip-worktree bits do not mean what this
+                    // parser assumes. Under a virtual filesystem those bits are not stored state --
+                    // git recomputes them on every index read -- so an index that is perfectly
+                    // valid to git can carry none at all. Fail here instead of projecting nothing.
+                    if (this.entriesSeenInBuild > 0 && this.entriesProjectedInBuild == 0)
+                    {
+                        throw new InvalidDataException(
+                            $"Refusing to build an empty projection from an index with {this.entriesSeenInBuild} entries. " +
+                            "No entry was marked skip-worktree, which usually means the index was written by a tool that " +
+                            "does not record those bits. To recover, remount; if that fails, run 'gvfs repair'.");
+                    }
+                }
+                finally
+                {
+                    // Seed mode applies to a single parse only; a later rebuild reads a real index.
+                    this.assumeSkipWorktree = false;
+                    this.materializedPathBytes.Clear();
                 }
             }
 
@@ -182,16 +287,63 @@ namespace GVFS.Virtualization.Projection
                     throw new InvalidDataException("Zero-length path found in index");
                 }
 
+                FailIfSparseDirectoryEntry(data);
+
                 return FileSystemTaskResult.Success;
+            }
+
+            /// <summary>
+            /// Fail fast when the index contains a sparse-directory entry (git index.sparse
+            /// format). Such an entry has mode 040000, the skip-worktree bit, and a trailing '/'.
+            /// GVFS builds its projection from the index and cannot yet expand a sparse
+            /// directory's tree. If it accepted the entry it would create a folder with an empty
+            /// child name and crash the mount later during ProjFS enumeration, after the mount
+            /// reported the repository ready. Worse, that projection would silently omit every
+            /// collapsed subtree. Shutting down here, at parse time, avoids serving an incomplete
+            /// working directory. Detection uses the trailing '/', not the mode field, because
+            /// Windows skips mode parsing (SupportsFileMode is false).
+            /// </summary>
+            private static void FailIfSparseDirectoryEntry(GitIndexEntry data)
+            {
+                if (data.PathEndsInSlash)
+                {
+                    string path = Encoding.UTF8.GetString(data.PathBuffer, 0, data.PathLength);
+                    throw new InvalidDataException(
+                        $"Unsupported sparse index. Entry '{path}' is a sparse-directory entry (git index.sparse). " +
+                        "This version of VFS for Git cannot project a sparse index. " +
+                        "To recover, run 'gvfs sparse-index --disable' from the enlistment. It unmounts if needed, " +
+                        "expands the index to full format, and clears the sparse-index config. Then run 'gvfs mount'.");
+                }
             }
 
             private FileSystemTaskResult AddIndexEntryToProjection(GitIndexEntry data)
             {
+                this.entriesSeenInBuild++;
+
                 // Never want to project the common ancestor even if the skip worktree bit is on
-                if ((data.MergeState != MergeStage.CommonAncestor && data.SkipWorktree) || data.MergeState == MergeStage.Yours)
+                if ((data.MergeState != MergeStage.CommonAncestor && this.EntryIsProjected(data)) || data.MergeState == MergeStage.Yours)
                 {
-                    data.BuildingProjection_ParsePath();
-                    this.projection.AddItemFromIndexEntry(data);
+                    this.entriesProjectedInBuild++;
+
+                    if (data.IsSparseDirectory)
+                    {
+                        // A sparse-directory entry (git index.sparse) collapses a folder to its
+                        // tree OID. When expansion is disabled, fail fast before building a
+                        // projection that omits the collapsed subtree and crashes ProjFS
+                        // enumeration. When enabled, expand the tree into the projection.
+                        if (!this.projection.SparseIndexExpansionEnabled)
+                        {
+                            FailIfSparseDirectoryEntry(data);
+                        }
+
+                        ValidateSparseDirectoryEntry(data);
+                        this.projection.ExpandSparseDirectory(data);
+                    }
+                    else
+                    {
+                        data.BuildingProjection_ParsePath();
+                        this.projection.AddItemFromIndexEntry(data);
+                    }
                 }
                 else
                 {
@@ -199,6 +351,84 @@ namespace GVFS.Virtualization.Projection
                 }
 
                 return FileSystemTaskResult.Success;
+            }
+
+            /// <summary>
+            /// Decide whether an index entry belongs in the projection.
+            /// </summary>
+            /// <remarks>
+            /// Normally this is the entry's skip-worktree bit: GVFS projects the entries git has
+            /// marked as absent from the working tree.
+            /// <para>
+            /// A clone-time seed index is different. It is produced by <c>git read-tree</c>, which
+            /// writes no skip-worktree bits at all, so reading the bit would project nothing. That
+            /// is not a defect in the seed: under a virtual filesystem the bit is not stored
+            /// state. <c>apply_virtualfilesystem()</c> recomputes it on every index read by
+            /// setting CE_SKIP_WORKTREE on every entry and then clearing it only for the paths the
+            /// virtual-filesystem hook reports as present. Seed mode performs exactly that
+            /// computation, using the modified-paths database as the set of present paths, so the
+            /// projection it produces matches the one built from an index git wrote.
+            /// </para>
+            /// </remarks>
+            private bool EntryIsProjected(GitIndexEntry data)
+            {
+                if (!this.assumeSkipWorktree)
+                {
+                    return data.SkipWorktree;
+                }
+
+                // A sparse-directory entry covers out-of-cone content, which is never
+                // materialized, so it is always projected.
+                if (data.IsSparseDirectory)
+                {
+                    return true;
+                }
+
+                // Compare against the materialized paths on the raw buffer. Decoding a string per
+                // entry would allocate once for every entry in a multi-million entry index; the
+                // materialized set is small (one path on a fresh clone), so a length check plus a
+                // byte compare is far cheaper and allocates nothing.
+                for (int i = 0; i < this.materializedPathBytes.Count; i++)
+                {
+                    byte[] candidate = this.materializedPathBytes[i];
+                    if (candidate.Length != data.PathLength)
+                    {
+                        continue;
+                    }
+
+                    bool same = true;
+                    for (int b = 0; b < candidate.Length; b++)
+                    {
+                        if (candidate[b] != data.PathBuffer[b])
+                        {
+                            same = false;
+                            break;
+                        }
+                    }
+
+                    if (same)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+
+            /// <summary>
+            /// Validate the invariants of a sparse-directory entry before expanding it. On a
+            /// platform that parses the mode field, the entry's type must be Directory (040000);
+            /// on Windows the mode is not parsed, so the trailing '/' is the only signal and no
+            /// further check applies here.
+            /// </summary>
+            private static void ValidateSparseDirectoryEntry(GitIndexEntry data)
+            {
+                if (GVFSPlatform.Instance.FileSystem.SupportsFileMode && data.TypeAndMode.Type != FileType.Directory)
+                {
+                    string path = Encoding.UTF8.GetString(data.PathBuffer, 0, data.PathLength);
+                    throw new InvalidDataException(
+                        $"Sparse-directory entry '{path}' has unexpected type {data.TypeAndMode.Type} (expected {FileType.Directory}).");
+                }
             }
 
             /// <summary>
@@ -329,6 +559,16 @@ namespace GVFS.Virtualization.Projection
                                 if (typeAndMode.Mode != 0)
                                 {
                                     throw new InvalidDataException($"Invalid file mode {typeAndMode.GetModeAsOctalString()} found for link file({typeAndMode.Type:X}) in index");
+                                }
+
+                                break;
+
+                            case FileType.Directory:
+                                // Sparse-directory entry (git index.sparse). Mode bits must be
+                                // zero; the entry carries a tree OID rather than file permissions.
+                                if (typeAndMode.Mode != 0)
+                                {
+                                    throw new InvalidDataException($"Invalid file mode {typeAndMode.GetModeAsOctalString()} found for sparse directory in index");
                                 }
 
                                 break;

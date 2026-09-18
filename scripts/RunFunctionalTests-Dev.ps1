@@ -74,7 +74,26 @@ if (-not (Test-Path (Join-Path $payloadDir "GVFS.exe"))) {
     Write-Error "Payload GVFS.exe not found at $payloadDir. Has the solution been built for $Arch / $Configuration?"
     exit 1
 }
-$env:PATH = "$payloadDir;C:\Program Files\Git\cmd;$env:PATH"
+# Resolve the Git installation the same way GVFS itself does, from the
+# GitForWindows registry key, rather than assuming the default install location.
+# Git for Windows can be installed anywhere, and its installer relocates an
+# existing installation rather than leaving one behind, so a hard-coded
+# "C:\Program Files\Git" silently disappears after such a move.
+$gitCmdDir = $null
+$gitInstallPath = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\GitForWindows' -Name InstallPath -ErrorAction SilentlyContinue).InstallPath
+if ($gitInstallPath -and (Test-Path (Join-Path $gitInstallPath 'cmd\git.exe'))) {
+    $gitCmdDir = Join-Path $gitInstallPath 'cmd'
+} elseif (Test-Path 'C:\Program Files\Git\cmd\git.exe') {
+    $gitCmdDir = 'C:\Program Files\Git\cmd'
+}
+
+if ($gitCmdDir) {
+    $env:PATH = "$payloadDir;$gitCmdDir;$env:PATH"
+} else {
+    # Leave PATH resolution to whatever git is already discoverable; the
+    # prerequisite check below reports a clear error if there is none.
+    $env:PATH = "$payloadDir;$env:PATH"
+}
 
 Write-Host "============================================"
 Write-Host "GVFS Functional Tests - Dev Mode (no admin)"

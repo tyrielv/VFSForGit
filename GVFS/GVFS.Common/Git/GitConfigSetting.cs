@@ -8,6 +8,18 @@ namespace GVFS.Common.Git
         public const string CoreVirtualFileSystemName = "core.virtualfilesystem";
         public const string CredentialUseHttpPath = "credential.\"https://dev.azure.com\".useHttpPath";
 
+        // Git config settings that gate the built-in sparse index. These are written only
+        // when the gvfs.auto-sparse-index feature is enabled (see RequiredGitConfig), so that
+        // git's is_sparse_index_allowed() lets the on-disk index collapse to cone entries.
+        public const string CoreSparseCheckoutConeName = "core.sparseCheckoutCone";
+        public const string IndexSparseName = "index.sparse";
+        public const string SparseExpectFilesOutsideOfPatternsName = "sparse.expectFilesOutsideOfPatterns";
+
+        // core.sparseCheckout turns on git's sparse-checkout machinery so it applies the
+        // cone in info/sparse-checkout when it rewrites the index. Clone-time sparse-index
+        // construction sets this; enable/disable of the feature leave it untouched.
+        public const string CoreSparseCheckoutName = "core.sparseCheckout";
+
         public const string HttpSslCert = "http.sslcert";
         public const string HttpSslVerify = "http.sslverify";
         public const string HttpSslCertPasswordProtected = "http.sslcertpasswordprotected";
