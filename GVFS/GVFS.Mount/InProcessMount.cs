@@ -542,9 +542,14 @@ namespace GVFS.Mount
         /// an extra serial ten seconds.
         /// </para>
         /// <para>
-        /// Returns null when the seed cannot help, which is the common case: a repository that is
-        /// not using a sparse index, or a mount whose projection is still valid and will not be
-        /// rebuilt. Returning null costs nothing, so the checks are ordered cheapest first.
+        /// This runs on every mount of a sparse enlistment, not only the first. The persisted
+        /// projection backup is a copy of the repository's index, and for a sparse enlistment that
+        /// copy is sparse, so every mount would otherwise re-expand the collapsed trees. A fresh
+        /// seed also cannot be stale, which a persisted one could be.
+        /// </para>
+        /// <para>
+        /// Returns null when the seed cannot help: a repository that is not using a sparse index.
+        /// Returning null costs nothing.
         /// </para>
         /// </remarks>
         private Task<GitProcess.Result> TryStartProjectionSeed(Stopwatch mountPhaseTimer, out string seedPath)
@@ -558,15 +563,6 @@ namespace GVFS.Mount
                         this.enlistment.WorkingDirectoryBackingRoot,
                         GVFSConstants.GitConfig.AutoSparseIndex,
                         GVFSConstants.GitConfig.AutoSparseIndexDefault))
-                {
-                    return null;
-                }
-
-                // Mirror the condition GitIndexProjection.Initialize uses to decide whether to
-                // rebuild. When the persisted projection is still usable the seed is dead weight.
-                string projectionPath = Path.Combine(this.enlistment.DotGVFSRoot, GitIndexProjection.ProjectionIndexBackupName);
-                bool willBuildProjection = !File.Exists(projectionPath) || RepoMetadata.Instance.GetProjectionInvalid();
-                if (!willBuildProjection)
                 {
                     return null;
                 }

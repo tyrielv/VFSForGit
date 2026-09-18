@@ -228,7 +228,16 @@ namespace GVFS.Virtualization.Projection
             {
                 this.projectionInvalid = this.repoMetadata.GetProjectionInvalid();
 
-                if (!this.context.FileSystem.FileExists(this.projectionIndexBackupPath) || this.projectionInvalid)
+                // A seed, when present, is always the better source: it is a full index written
+                // for the current HEAD, so parsing it avoids re-expanding the collapsed trees that
+                // the persisted backup still holds. Prefer it even when the backup is usable,
+                // because for a sparse enlistment that backup is sparse and would cost a full
+                // tree walk to parse. CopyIndexFileAndBuildProjection consumes the seed if it is
+                // there and falls back to the backup if it is not.
+                string seedPath = Path.Combine(this.context.Enlistment.DotGVFSRoot, ProjectionIndexSeedName);
+                bool seedAvailable = this.context.FileSystem.FileExists(seedPath);
+
+                if (seedAvailable || !this.context.FileSystem.FileExists(this.projectionIndexBackupPath) || this.projectionInvalid)
                 {
                     this.CopyIndexFileAndBuildProjection();
                 }
