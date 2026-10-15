@@ -20,6 +20,15 @@ namespace GVFS.UnitTests.Mock.Git
             this.AddTree(this.rootSha, ".");
         }
 
+        public Dictionary<string, string> Config { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public bool ConfigAvailable { get; set; } = true;
+
+        public override bool TryGetConfigValue(string name, out string value)
+        {
+            this.Config.TryGetValue(name, out value);
+            return this.ConfigAvailable;
+        }
+
         /// <summary>
         /// Adds an unparented tree to the "repo"
         /// </summary>

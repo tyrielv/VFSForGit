@@ -427,6 +427,11 @@ namespace GVFS.Platform.Windows
         {
             try
             {
+                if (this.FileSystemCallbacks.IsProcessBlocked(triggeringProcessImageFileName, triggeringProcessId, virtualPath, nameof(this.StartDirectoryEnumerationCallback)))
+                {
+                    return HResult.AccessDenied;
+                }
+
                 this.MaybeEvictStaleEnumerations();
 
                 List<ProjectedFileInfo> projectedItems;
@@ -637,6 +642,11 @@ namespace GVFS.Platform.Windows
         {
             try
             {
+                if (this.FileSystemCallbacks.IsProcessBlocked(triggeringProcessImageFileName, triggeringProcessId, virtualPath, nameof(this.GetPlaceholderInfoCallback)))
+                {
+                    return HResult.AccessDenied;
+                }
+
                 bool isFolder;
                 string fileName;
                 if (!this.FileSystemCallbacks.GitIndexProjection.IsPathProjected(virtualPath, out fileName, out isFolder))
@@ -722,6 +732,11 @@ namespace GVFS.Platform.Windows
         {
             try
             {
+                if (this.FileSystemCallbacks.IsProcessBlocked(triggeringProcessImageFileName, triggeringProcessId, virtualPath, nameof(this.GetFileDataCallback)))
+                {
+                    return HResult.AccessDenied;
+                }
+
                 if (contentId == null)
                 {
                     this.Context.Tracer.RelatedError($"{nameof(this.GetFileDataCallback)} called with null contentId, path: " + virtualPath);

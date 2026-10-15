@@ -1,6 +1,14 @@
 Troubleshooting
 ===============
 
+Experimental blocked process policy
+-----------------------------------
+
+The `gvfs.blocked-processes` configuration can deny enumeration, placeholder creation, and hydration for selected executable names.
+The default list is empty.
+If a configured scanner reports access denied or an incomplete result, inspect the mount log for `BlockedProcess` events.
+See [Blocked processes](blocked-processes.md) for configuration, observed scanner behavior, and limitations.
+
 Deleting a VFS for Git repo
 ---------------------------
 

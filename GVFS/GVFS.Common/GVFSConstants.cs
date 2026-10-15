@@ -30,6 +30,8 @@ namespace GVFS.Common
             public const string TimeoutSecondsConfig = GVFSPrefix + "timeout-seconds";
             public const string GitStatusCacheBackoffConfig = GVFSPrefix + "status-cache-backoff-seconds";
             public const string MaxActiveEnumerationsConfig = GVFSPrefix + "max-active-enumerations";
+            public const string BlockedProcesses = GVFSPrefix + "blocked-processes";
+            public const string BlockedProcessesDefault = "";
             public const string MountId = GVFSPrefix + "mount-id";
             public const string EnlistmentId = GVFSPrefix + "enlistment-id";
             public const string CacheServer = GVFSPrefix + "cache-server";

@@ -38,6 +38,9 @@ namespace GVFS.Virtualization
         private ConcurrentDictionary<string, PlaceHolderCreateCounter> filePlaceHolderCreationCount;
         private ConcurrentDictionary<string, PlaceHolderCreateCounter> folderPlaceHolderCreationCount;
         private ConcurrentDictionary<string, PlaceHolderCreateCounter> fileHydrationCount;
+        private HashSet<string> blockedProcessNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, byte> reportedBlockedProcessOperations = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        private long blockedProcessCallbackCount;
         private BackgroundFileSystemTaskRunner backgroundFileSystemTaskRunner;
         private FileSystemVirtualizer fileSystemVirtualizer;
         private FileProperties logsHeadFileProperties;
@@ -158,6 +161,12 @@ namespace GVFS.Virtualization
 
         public bool TryStart(out string error)
         {
+            if (!this.TryLoadBlockedProcesses(out error))
+            {
+                this.context.Tracer.RelatedError(error);
+                return false;
+            }
+
             this.fileSystemVirtualizer.Initialize(this);
             this.modifiedPaths.RemoveEntriesWithParentFolderEntry(this.context.Tracer);
             this.modifiedPaths.WriteAllEntriesAndFlush();
@@ -176,6 +185,79 @@ namespace GVFS.Virtualization
                 return false;
             }
 
+            return true;
+        }
+
+        public bool IsProcessBlocked(string triggeringProcessImageFileName, uint triggeringProcessId, string relativePath, string operation)
+        {
+            if (this.blockedProcessNames.Count == 0 || string.IsNullOrEmpty(triggeringProcessImageFileName))
+            {
+                return false;
+            }
+
+            string processName = Path.GetFileName(triggeringProcessImageFileName);
+            if (!this.blockedProcessNames.Contains(processName))
+            {
+                return false;
+            }
+
+            Interlocked.Increment(ref this.blockedProcessCallbackCount);
+
+            // Bound diagnostics by the configured names and callback types, not the number of paths or PIDs.
+            if (this.reportedBlockedProcessOperations.TryAdd(processName + "|" + operation, 0))
+            {
+                EventMetadata metadata = new EventMetadata();
+                metadata.Add("processName", processName);
+                metadata.Add("triggeringProcessId", triggeringProcessId);
+                metadata.Add("relativePath", relativePath);
+                metadata.Add("operation", operation);
+                metadata.Add("configKey", GVFSConstants.GitConfig.BlockedProcesses);
+                metadata.Add(
+                    TracingConstants.MessageKey.WarningMessage,
+                    "Access to projected data was denied by the blocked process list. Change " +
+                    GVFSConstants.GitConfig.BlockedProcesses + " and remount to change this policy.");
+                this.context.Tracer.RelatedEvent(EventLevel.Warning, "BlockedProcess", metadata);
+            }
+
+            return true;
+        }
+
+        private bool TryLoadBlockedProcesses(out string error)
+        {
+            string configuredNames;
+            try
+            {
+                if (!this.context.Repository.TryGetConfigValue(GVFSConstants.GitConfig.BlockedProcesses, out configuredNames))
+                {
+                    error = "Failed to read " + GVFSConstants.GitConfig.BlockedProcesses + ". Check the repository configuration and remount.";
+                    return false;
+                }
+            }
+            catch (LibGit2Exception e)
+            {
+                this.context.Tracer.RelatedWarning(
+                    new EventMetadata { { "Exception", e.ToString() } },
+                    "Failed to read " + GVFSConstants.GitConfig.BlockedProcesses);
+                error = "Failed to read " + GVFSConstants.GitConfig.BlockedProcesses + ". Check the repository configuration and remount.";
+                return false;
+            }
+
+            HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string name in (configuredNames ?? GVFSConstants.GitConfig.BlockedProcessesDefault).Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (name == "." || name == ".." ||
+                    name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                    name.Contains('\\') || name.Contains('/'))
+                {
+                    error = GVFSConstants.GitConfig.BlockedProcesses + " must contain semicolon-separated executable names, not paths or patterns. Correct the configuration and remount.";
+                    return false;
+                }
+
+                names.Add(name);
+            }
+
+            this.blockedProcessNames = names;
+            error = null;
             return true;
         }
 
@@ -277,6 +359,13 @@ namespace GVFS.Virtualization
             metadata.Add("ModifiedPathsCount", this.modifiedPaths.Count);
             metadata.Add("FilePlaceholderCount", this.placeholderDatabase.GetFilePlaceholdersCount());
             metadata.Add("FolderPlaceholderCount", this.placeholderDatabase.GetFolderPlaceholdersCount());
+
+            long blockedCount = Interlocked.Exchange(ref this.blockedProcessCallbackCount, 0);
+            if (blockedCount > 0)
+            {
+                metadata.Add("BlockedProcessCallbackCount", blockedCount);
+                logToFile = true;
+            }
 
             this.fileSystemVirtualizer?.AddHeartbeatMetadata(metadata);
 

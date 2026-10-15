@@ -1,4 +1,5 @@
-﻿using GVFS.Platform.Windows;
+﻿using GVFS.Common;
+using GVFS.Platform.Windows;
 using GVFS.Tests.Should;
 using GVFS.UnitTests.Category;
 using GVFS.UnitTests.Mock.Common;
@@ -35,6 +36,147 @@ namespace GVFS.UnitTests.Windows.Virtualization
         };
 
         private static int numWorkThreads = 1;
+
+        [TestCase("rg.exe", true)]
+        [TestCase("RG.EXE", true)]
+        [TestCase(@"C:\tools\rg.exe", true)]
+        [TestCase(@"\Device\HarddiskVolume3\tools\WinDirStat.EXE", true)]
+        [TestCase("windirstat.exe", true)]
+        [TestCase("my-rg.exe", false)]
+        [TestCase("rg.exe.backup", false)]
+        [TestCase(@"C:\rg.exe\git.exe", false)]
+        [TestCase("rg", false)]
+        [TestCase("git.exe", false)]
+        [TestCase(null, false)]
+        [TestCase("", false)]
+        public void BlockedProcessesMatchExactExecutableNames(string processImage, bool blocked)
+        {
+            this.Repo.Repository.Config[GVFSConstants.GitConfig.BlockedProcesses] = " ; RG.EXE; windirstat.exe ;rg.exe;; ";
+            using (WindowsFileSystemVirtualizerTester tester = new WindowsFileSystemVirtualizerTester(this.Repo))
+            {
+                tester.FileSystemCallbacks.IsProcessBlocked(processImage, TriggeringProcessId, "test.txt", "test").ShouldEqual(blocked);
+            }
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase(" ; ; ")]
+        public void EmptyBlockedProcessListPreservesAccess(string configuration)
+        {
+            this.Repo.Repository.Config[GVFSConstants.GitConfig.BlockedProcesses] = configuration;
+            using (WindowsFileSystemVirtualizerTester tester = new WindowsFileSystemVirtualizerTester(this.Repo))
+            {
+                tester.FileSystemCallbacks.IsProcessBlocked(@"C:\tools\rg.exe", TriggeringProcessId, "test.txt", "test").ShouldBeFalse();
+            }
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void BlockedEnumerationDoesNotRegisterWorkOrPreventAllowedEnumeration(bool inMemory)
+        {
+            this.Repo.Repository.Config[GVFSConstants.GitConfig.BlockedProcesses] = "rg.exe";
+            using (WindowsFileSystemVirtualizerTester tester = new WindowsFileSystemVirtualizerTester(this.Repo, new[] { "test" }))
+            {
+                tester.GitIndexProjection.EnumerationInMemory = inMemory;
+                Guid enumerationId = Guid.NewGuid();
+                tester.WindowsVirtualizer.StartDirectoryEnumerationCallback(1, enumerationId, "test", TriggeringProcessId, @"C:\tools\RG.EXE").ShouldEqual(HResult.AccessDenied);
+                tester.WindowsVirtualizer.ActiveEnumerationsContainsForTest(enumerationId).ShouldBeFalse();
+
+                EventMetadata metadata = new EventMetadata();
+                tester.WindowsVirtualizer.AddHeartbeatMetadata(metadata);
+                metadata.ShouldContain("ActiveEnumerationCount", 0);
+                metadata.ShouldContain("ActiveCommandCount", 0);
+
+                tester.WindowsVirtualizer.StartDirectoryEnumerationCallback(1, enumerationId, "test", TriggeringProcessId, "git.exe")
+                    .ShouldEqual(inMemory ? HResult.Ok : HResult.Pending);
+                if (!inMemory)
+                {
+                    tester.MockVirtualization.WaitForCompletionStatus().ShouldEqual(HResult.Ok);
+                }
+
+                tester.WindowsVirtualizer.EndDirectoryEnumerationCallback(enumerationId).ShouldEqual(HResult.Ok);
+            }
+        }
+
+        [TestCase("test.txt")]
+        [TestCase("folder")]
+        [TestCase(".gitignore")]
+        public void BlockedPlaceholderRequestDoesNotWritePlaceholder(string path)
+        {
+            this.Repo.Repository.Config[GVFSConstants.GitConfig.BlockedProcesses] = "windirstat.exe";
+            using (WindowsFileSystemVirtualizerTester tester = new WindowsFileSystemVirtualizerTester(this.Repo, new[] { path }))
+            {
+                tester.WindowsVirtualizer.GetPlaceholderInfoCallback(1, path, TriggeringProcessId, "windirstat.exe").ShouldEqual(HResult.AccessDenied);
+                tester.MockVirtualization.CreatedPlaceholders.Count.ShouldEqual(0);
+                tester.GitIndexProjection.PlaceholdersCreated.Count.ShouldEqual(0);
+                tester.BackgroundTaskRunner.Count.ShouldEqual(0);
+                EventMetadata metadata = new EventMetadata();
+                tester.WindowsVirtualizer.AddHeartbeatMetadata(metadata);
+                metadata.ShouldContain("ActiveCommandCount", 0);
+
+                tester.WindowsVirtualizer.GetPlaceholderInfoCallback(1, path, TriggeringProcessId, "git.exe").ShouldEqual(HResult.Pending);
+                tester.MockVirtualization.WaitForCompletionStatus().ShouldEqual(HResult.Ok);
+                tester.MockVirtualization.CreatedPlaceholders.ShouldContain(entry => entry == path);
+            }
+        }
+
+        [TestCase]
+        public void BlockedHydrationDoesNotRegisterWorkOrPreventAllowedHydration()
+        {
+            this.Repo.Repository.Config[GVFSConstants.GitConfig.BlockedProcesses] = "rg.exe";
+            using (WindowsFileSystemVirtualizerTester tester = new WindowsFileSystemVirtualizerTester(this.Repo))
+            {
+                tester.WindowsVirtualizer.GetFileDataCallback(
+                    1, "test.txt", 0, MockGVFSGitObjects.DefaultFileLength, Guid.NewGuid(),
+                    CommonRepoSetup.DefaultContentId, WindowsFileSystemVirtualizer.PlaceholderVersionId,
+                    TriggeringProcessId, "rg.exe").ShouldEqual(HResult.AccessDenied);
+
+                EventMetadata metadata = new EventMetadata();
+                tester.WindowsVirtualizer.AddHeartbeatMetadata(metadata);
+                metadata.ShouldContain("ActiveCommandCount", 0);
+
+                tester.InvokeGetFileDataCallback();
+                tester.MockVirtualization.WaitForCompletionStatus().ShouldEqual(HResult.Ok);
+            }
+        }
+
+        [TestCase]
+        public void BlockedDiagnosticsAreBoundedByProcessAndOperation()
+        {
+            this.Repo.Repository.Config[GVFSConstants.GitConfig.BlockedProcesses] = "rg.exe";
+            using (WindowsFileSystemVirtualizerTester tester = new WindowsFileSystemVirtualizerTester(this.Repo))
+            {
+                for (uint i = 0; i < 100; i++)
+                {
+                    tester.WindowsVirtualizer.GetPlaceholderInfoCallback((int)i, "test" + i, i, "rg.exe").ShouldEqual(HResult.AccessDenied);
+                    tester.WindowsVirtualizer.StartDirectoryEnumerationCallback((int)i, Guid.NewGuid(), "test" + i, i, "RG.EXE").ShouldEqual(HResult.AccessDenied);
+                }
+
+                MockTracer tracer = (MockTracer)this.Repo.Context.Tracer;
+                tracer.RelatedEventNames.Count(name => name == "BlockedProcess").ShouldEqual(2);
+            }
+        }
+
+        [TestCase]
+        public void HeartbeatReportsAndResetsBlockedCallbackCount()
+        {
+            this.Repo.Repository.Config[GVFSConstants.GitConfig.BlockedProcesses] = "rg.exe";
+            using (WindowsFileSystemVirtualizerTester tester = new WindowsFileSystemVirtualizerTester(this.Repo))
+            {
+                tester.MockPlaceholderDb.Setup(database => database.GetFilePlaceholdersCount()).Returns(0);
+                tester.MockPlaceholderDb.Setup(database => database.GetFolderPlaceholdersCount()).Returns(0);
+                tester.WindowsVirtualizer.GetPlaceholderInfoCallback(1, "test.txt", TriggeringProcessId, "rg.exe").ShouldEqual(HResult.AccessDenied);
+                tester.WindowsVirtualizer.GetPlaceholderInfoCallback(2, "test.txt", TriggeringProcessId, "RG.EXE").ShouldEqual(HResult.AccessDenied);
+
+                EventMetadata metadata = tester.FileSystemCallbacks.GetAndResetHeartBeatMetadata(out bool logToFile);
+                metadata.ShouldContain("BlockedProcessCallbackCount", 2L);
+                logToFile.ShouldBeTrue();
+
+                metadata = tester.FileSystemCallbacks.GetAndResetHeartBeatMetadata(out logToFile);
+                metadata.ContainsKey("BlockedProcessCallbackCount").ShouldBeFalse();
+                logToFile.ShouldBeFalse();
+            }
+        }
 
         [TestCase]
         public void HResultToFSResultMapsHResults()

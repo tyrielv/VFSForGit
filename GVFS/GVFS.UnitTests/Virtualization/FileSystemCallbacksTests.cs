@@ -23,6 +23,30 @@ namespace GVFS.UnitTests.Virtualization
     [TestFixture]
     public class FileSystemCallbacksTests : TestsWithCommonRepo
     {
+        [TestCase(@"C:\tools\rg.exe", true)]
+        [TestCase("rg*.exe", true)]
+        [TestCase("rg?.exe", true)]
+        [TestCase("rg.exe|windirstat.exe", true)]
+        [TestCase("tools/rg.exe", true)]
+        [TestCase("..", true)]
+        [TestCase("", false)]
+        public void InvalidBlockedProcessConfigurationFailsBeforeVirtualizationStarts(string configuration, bool configAvailable)
+        {
+            this.Repo.Repository.Config[GVFSConstants.GitConfig.BlockedProcesses] = configuration;
+            this.Repo.Repository.ConfigAvailable = configAvailable;
+            Mock<IPlaceholderCollection> placeholderDb = new Mock<IPlaceholderCollection>();
+            using (MockBackgroundFileSystemTaskRunner backgroundRunner = new MockBackgroundFileSystemTaskRunner())
+            using (MockGitIndexProjection projection = new MockGitIndexProjection(Array.Empty<string>()))
+            using (FileSystemCallbacks callbacks = new FileSystemCallbacks(
+                this.Repo.Context, this.Repo.GitObjects, RepoMetadata.Instance, new MockBlobSizes(),
+                projection, backgroundRunner, fileSystemVirtualizer: null, placeholderDb.Object, new Mock<ISparseCollection>().Object))
+            {
+                callbacks.TryStart(out string error).ShouldBeFalse();
+                error.ShouldContain(GVFSConstants.GitConfig.BlockedProcesses);
+                ((MockTracer)this.Repo.Context.Tracer).RelatedErrorEvents.Count.ShouldEqual(1);
+            }
+        }
+
         [TestCase]
         public void EmptyStringIsNotInsideDotGitPath()
         {
