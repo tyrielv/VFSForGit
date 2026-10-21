@@ -66,7 +66,8 @@ namespace GVFS.CommandLine
                 tracer.AddLogFileEventListener(
                     GVFSEnlistment.GetNewGVFSLogFileName(enlistment.GVFSLogsRoot, GVFSConstants.LogFileTypes.Health),
                     EventLevel.Informational,
-                    Keywords.Any);
+                    Keywords.Any,
+                    logRotationConfig: enlistment.CreateGitProcess());
 
                 if (this.StatusOnly)
                 {

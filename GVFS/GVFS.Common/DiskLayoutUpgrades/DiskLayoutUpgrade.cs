@@ -342,7 +342,10 @@ namespace GVFS.DiskLayoutUpgrades
                         Path.Combine(enlistmentRoot, GVFSPlatform.Instance.Constants.DotGVFSRoot, GVFSConstants.DotGVFS.LogName),
                         GVFSConstants.LogFileTypes.MountUpgrade),
                     EventLevel.Informational,
-                    Keywords.Any);
+                    Keywords.Any,
+                    logRotationConfig: new GitProcess(
+                        GVFSPlatform.Instance.GitInstallation.GetInstalledGitBinPath(),
+                        Path.Combine(enlistmentRoot, GVFSConstants.WorkingDirectoryRootName)));
 
                 tracer.WriteStartEvent(enlistmentRoot, repoUrl: "N/A", cacheServerUrl: "N/A");
             }

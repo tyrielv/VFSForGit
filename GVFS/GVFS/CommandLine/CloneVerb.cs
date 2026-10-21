@@ -219,7 +219,8 @@ namespace GVFS.CommandLine
                         tracer.AddLogFileEventListener(
                             GVFSEnlistment.GetNewGVFSLogFileName(enlistment.GVFSLogsRoot, GVFSConstants.LogFileTypes.Clone),
                             EventLevel.Informational,
-                            Keywords.Any);
+                            Keywords.Any,
+                            logRotationConfig: enlistment.CreateGitProcess());
                         tracer.WriteStartEvent(
                             enlistment.PrimaryEnlistmentRoot,
                             enlistment.RepoUrl,

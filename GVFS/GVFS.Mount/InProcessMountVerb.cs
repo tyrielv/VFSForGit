@@ -173,7 +173,8 @@ namespace GVFS.Mount
             tracer.AddLogFileEventListener(
                 GVFSEnlistment.GetNewGVFSLogFileName(enlistment.GVFSLogsRoot, GVFSConstants.LogFileTypes.MountProcess),
                 verbosity,
-                keywords);
+                keywords,
+                logRotationConfig: enlistment.CreateGitProcess());
             if (this.ShowDebugWindow)
             {
                 tracer.AddDiagnosticConsoleEventListener(verbosity, keywords);

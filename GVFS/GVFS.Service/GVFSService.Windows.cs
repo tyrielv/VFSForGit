@@ -241,7 +241,8 @@ namespace GVFS.Service
             this.tracer.AddLogFileEventListener(
                 GVFSEnlistment.GetNewGVFSLogFileName(serviceLogsDirectoryPath, GVFSConstants.LogFileTypes.Service),
                 EventLevel.Verbose,
-                Keywords.Any);
+                Keywords.Any,
+                useSystemLogRotationConfig: true);
 
             try
             {
@@ -291,7 +292,8 @@ namespace GVFS.Service
             this.tracer.AddLogFileEventListener(
                 GVFSEnlistment.GetNewGVFSLogFileName(serviceLogsDirectoryPath, GVFSConstants.LogFileTypes.Service),
                 EventLevel.Verbose,
-                Keywords.Any);
+                Keywords.Any,
+                useSystemLogRotationConfig: true);
 
             try
             {

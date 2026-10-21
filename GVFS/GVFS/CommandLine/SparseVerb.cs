@@ -170,7 +170,8 @@ namespace GVFS.CommandLine
                 tracer.AddLogFileEventListener(
                     GVFSEnlistment.GetNewGVFSLogFileName(enlistment.GVFSLogsRoot, GVFSConstants.LogFileTypes.Sparse),
                     EventLevel.Informational,
-                    Keywords.Any);
+                    Keywords.Any,
+                    logRotationConfig: enlistment.CreateGitProcess());
 
                 EventMetadata metadata = new EventMetadata();
                 metadata.Add(nameof(this.Set), this.Set);

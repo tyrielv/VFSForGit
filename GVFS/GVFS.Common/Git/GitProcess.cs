@@ -146,6 +146,21 @@ namespace GVFS.Common.Git
                 settingName);
         }
 
+        public virtual Result GetBooleanConfig(string settingName, bool systemOnly = false, PhysicalFileSystem fileSystem = null)
+        {
+            string command = "config " + (systemOnly ? "--system " : string.Empty) + "--type=bool --get " + settingName;
+            fileSystem = fileSystem ?? new PhysicalFileSystem();
+
+            // Before clone creates .git, use the non-repository configuration.
+            bool hasRepository = !systemOnly &&
+                this.dotGitRoot != null &&
+                (fileSystem.DirectoryExists(this.dotGitRoot) || fileSystem.FileExists(this.dotGitRoot));
+
+            return hasRepository
+                ? this.InvokeGitAgainstDotGitFolder(command, usePreCommandHook: false)
+                : this.InvokeGitOutsideEnlistment(command);
+        }
+
         public static bool TryGetVersion(string gitBinPath, out GitVersion gitVersion, out string error)
         {
             GitProcess gitProcess = new GitProcess(gitBinPath, null);

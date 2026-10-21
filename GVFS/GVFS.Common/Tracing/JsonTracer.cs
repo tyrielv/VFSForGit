@@ -1,4 +1,5 @@
-﻿using System;
+﻿using GVFS.Common.Git;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -125,9 +126,25 @@ namespace GVFS.Common.Tracing
             this.AddEventListener(new PrettyConsoleEventListener(maxVerbosity, keywordFilter, this));
         }
 
-        public void AddLogFileEventListener(string logFilePath, EventLevel maxVerbosity, Keywords keywordFilter)
+        public void AddLogFileEventListener(
+            string logFilePath,
+            EventLevel maxVerbosity,
+            Keywords keywordFilter,
+            GitProcess logRotationConfig = null,
+            bool useSystemLogRotationConfig = false)
         {
-            this.AddEventListener(new LogFileEventListener(logFilePath, maxVerbosity, keywordFilter, this));
+            bool enableRotation = false;
+            string configError = null;
+            if (logRotationConfig != null || useSystemLogRotationConfig)
+            {
+                enableRotation = LogRotationConfig.ReadEnabled(logRotationConfig, useSystemLogRotationConfig, out configError);
+            }
+
+            this.AddEventListener(new LogFileEventListener(logFilePath, maxVerbosity, keywordFilter, this, enableRotation));
+            if (configError != null)
+            {
+                this.RelatedWarning(configError);
+            }
         }
 
         public void Dispose()

@@ -127,7 +127,8 @@ To actually execute any necessary repair(s), run 'gvfs repair --confirm'
                 tracer.AddLogFileEventListener(
                     GVFSEnlistment.GetNewGVFSLogFileName(enlistment.GVFSLogsRoot, GVFSConstants.LogFileTypes.Repair),
                     EventLevel.Verbose,
-                    Keywords.Any);
+                    Keywords.Any,
+                    logRotationConfig: enlistment.CreateGitProcess());
                 tracer.WriteStartEvent(
                     enlistment.PrimaryEnlistmentRoot,
                     enlistment.RepoUrl,

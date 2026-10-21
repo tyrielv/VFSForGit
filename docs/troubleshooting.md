@@ -199,6 +199,71 @@ copy the partial directory and paste it inside the enlistment. The newly pasted
 directory is a regular directory and can be renamed or moved around inside the
 enlistment. The original partial directory can now be deleted.
 
+Optional log rotation
+---------------------
+
+Log rotation is off by default. The `gvfs.log-rotation` Git configuration
+controls rotation for new GVFS processes. An active process keeps its
+startup configuration.
+
+For an existing repository, enable rotation from its `src` directory:
+
+```powershell
+git config gvfs.log-rotation true
+```
+
+Before a clone, enable rotation in your global configuration:
+
+```powershell
+git config --global gvfs.log-rotation true
+```
+
+Repository processes use the effective repository configuration.
+Before the repository exists, clone uses the non-repository configuration.
+Invalid values and configuration access failures produce a warning and
+leave rotation off.
+
+Both service modes use only the Git system configuration. The installed
+service does not use your interactive user's global configuration.
+For the next service start, enable rotation from an elevated terminal:
+
+```powershell
+git config --system gvfs.log-rotation true
+```
+
+The first file keeps its timestamped name. Later segments use
+`<basename>_part000001.log`, then larger part numbers in the same directory.
+The basename retains any collision GUID. GVFS never truncates or overwrites
+an existing segment.
+
+The provisional segment limit is 64 MiB (67,108,864 bytes).
+The limit includes UTF-8 bytes, startup context, and newlines.
+GVFS starts a new segment before the next complete event exceeds the limit.
+A complete event and its context can exceed the limit.
+That segment records the size exception instead of splitting the event.
+If a replacement file fails to open, GVFS reports the failure and continues
+with the previous writer where possible. This fallback can exceed the limit.
+
+Each segment starts with a `LogSegmentContext` record.
+This bounded context contains the original process identity, version,
+startup times, original filename, and segment links. GVFS does not replay
+ordinary events. The `gvfs log` command selects the latest segment.
+The `gvfs diagnose` command collects all available segments.
+
+Rotation does not delete files or limit the total directory size.
+The separate retention feature owns deletion. Rotation does not enable
+retention, and rotation alone can accumulate closed segments.
+
+To disable rotation for new repository processes, run:
+
+```powershell
+git config gvfs.log-rotation false
+```
+
+For global or service configuration, use the same command with `--global`
+or `--system`, respectively. Existing processes and segments remain unchanged.
+New processes return to the original append behavior and filename format.
+
 Diagnosing Issues
 -----------------
 

@@ -1,6 +1,7 @@
 using GVFS.Common;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 
@@ -109,11 +110,36 @@ namespace GVFS.CommandLine
                 return null;
             }
 
-            return
-                files
-                .OrderByDescending(fileInfo => fileInfo.CreationTime)
-                .First()
-                .FullName;
+            return FindNewestFile(files.Select(file => (file.FullName, file.CreationTimeUtc)));
+        }
+
+        internal static string FindNewestFile(IEnumerable<(string Path, DateTime CreationTimeUtc)> files)
+        {
+            return files
+                .Select(file =>
+                {
+                    string name = Path.GetFileNameWithoutExtension(file.Path);
+                    int partIndex = name.LastIndexOf("_part", StringComparison.Ordinal);
+                    long part = 0;
+                    bool isSegment = partIndex >= 0 &&
+                        name.Length - partIndex - 5 >= 6 &&
+                        long.TryParse(name.Substring(partIndex + 5), NumberStyles.None, CultureInfo.InvariantCulture, out part);
+                    return new
+                    {
+                        file.Path,
+                        file.CreationTimeUtc,
+                        Invocation = isSegment ? name.Substring(0, partIndex) : name,
+                        Part = isSegment ? part : 0,
+                    };
+                })
+                .GroupBy(file => file.Invocation, StringComparer.Ordinal)
+                .OrderByDescending(invocation => invocation.Max(file => file.CreationTimeUtc))
+                .ThenByDescending(invocation => invocation.Key, StringComparer.Ordinal)
+                .SelectMany(invocation => invocation
+                    .OrderByDescending(file => file.Part)
+                    .ThenByDescending(file => file.CreationTimeUtc)
+                    .ThenByDescending(file => file.Path, StringComparer.Ordinal))
+                .FirstOrDefault()?.Path;
         }
 
         private static string GetLogFilePatternForType(string logFileType)
